@@ -20,10 +20,10 @@ Notes are stored locally as JSON in `~/.local/share/sticky-notes/notes.json`. No
 
 ## Install
 
-Download `sticky-notes@runnylogan.shell-extension.zip` from the [latest release](https://github.com/runnylogan/gnome-shell-sticky-notes/releases/latest), then:
+Download `sticky-notes.shell-extension.zip` from the [latest release](https://github.com/runnylogan/gnome-shell-sticky-notes/releases/latest), then:
 
 ```bash
-gnome-extensions install --force sticky-notes@runnylogan.shell-extension.zip
+gnome-extensions install --force sticky-notes.shell-extension.zip
 ```
 
 Log out and back in (Wayland), then enable it:
