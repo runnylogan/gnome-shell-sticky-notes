@@ -1,0 +1,11 @@
+{
+  "uuid": "sticky-notes@runnylogan",
+  "name": "Sticky Notes",
+  "description": "Lightweight sticky notes on your desktop, with Markdown (headings, bold/italic, lists, checkboxes, code, quotes, links). Left-click the panel icon to show or hide notes (creates one if none exist); right-click for New note, Restore last closed note, Tile, Cascade and Restore previous layout. Drag by the top bar, resize from the bottom-right corner. Super+Alt+N new note, Super+Alt+S show/hide. Notes are saved to ~/.local/share/sticky-notes/notes.json.",
+  "shell-version": [
+    "50",
+    "51"
+  ],
+  "settings-schema": "org.gnome.shell.extensions.sticky-notes",
+  "url": "https://github.com/runnylogan/gnome-shell-sticky-notes"
+}

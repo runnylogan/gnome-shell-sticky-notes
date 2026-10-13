@@ -1,0 +1,81 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+.sticky-note {
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.30);
+  color: #2b2b2b;
+}
+
+.sticky-note-yellow { background-color: #fff1a8; }
+.sticky-note-green  { background-color: #c8f0c0; }
+.sticky-note-blue   { background-color: #c4e1ff; }
+.sticky-note-pink   { background-color: #ffcfe3; }
+.sticky-note-purple { background-color: #e0d0ff; }
+.sticky-note-grey   { background-color: #e6e6e6; }
+
+.sticky-note-header {
+  padding: 4px 4px 0 4px;
+  spacing: 2px;
+}
+
+.sticky-note-drag {
+  min-height: 24px;
+}
+
+.sticky-note-button {
+  border-radius: 6px;
+  padding: 4px;
+  color: rgba(0, 0, 0, 0.5);
+  background-color: transparent;
+}
+
+.sticky-note-button:hover,
+.sticky-note-button:focus {
+  color: rgba(0, 0, 0, 0.85);
+  background-color: rgba(0, 0, 0, 0.08);
+}
+
+.sticky-note-button.confirm,
+.sticky-note-button.confirm:hover {
+  color: #ffffff;
+  background-color: #c01c28;
+}
+
+.sticky-note-icon {
+  icon-size: 14px;
+}
+
+.sticky-note .sticky-note-text,
+.sticky-note .sticky-note-text:hover,
+.sticky-note .sticky-note-text:focus {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 2px 10px;
+  min-height: 0;
+  color: #2b2b2b;
+  caret-color: #2b2b2b;
+  selection-background-color: rgba(0, 0, 0, 0.18);
+  selected-color: #000000;
+  font-size: 11pt;
+}
+
+.sticky-note .sticky-note-text StLabel.hint-text {
+  color: rgba(0, 0, 0, 0.4);
+}
+
+.sticky-note-grip {
+  color: rgba(0, 0, 0, 0.3);
+  font-size: 9pt;
+  padding: 0 3px 1px 6px;
+}
+
+.sticky-note-grip:hover {
+  color: rgba(0, 0, 0, 0.6);
+}
+
+.sticky-note-view {
+  padding: 2px 10px 6px 10px;
+  color: #2b2b2b;
+  font-size: 11pt;
+}
