@@ -2,6 +2,8 @@
 
 Lightweight sticky notes that sit on your desktop, above windows and below the top bar. Supports GNOME Shell 50 and 51.
 
+![Sticky notes on the GNOME desktop](docs/screenshot.jpg)
+
 ## Features
 
 - **Panel icon** — left-click shows or hides all notes (creates one if none exist). Right-click for:
@@ -16,6 +18,20 @@ Lightweight sticky notes that sit on your desktop, above windows and below the t
 
 Notes are stored locally as JSON in `~/.local/share/sticky-notes/notes.json`. Nothing leaves your machine.
 
+## Install
+
+Download `sticky-notes@runnylogan.shell-extension.zip` from the [latest release](https://github.com/runnylogan/gnome-shell-sticky-notes/releases/latest), then:
+
+```bash
+gnome-extensions install --force sticky-notes@runnylogan.shell-extension.zip
+```
+
+Log out and back in (Wayland), then enable it:
+
+```bash
+gnome-extensions enable sticky-notes@runnylogan
+```
+
 ## Install from source
 
 ```bash
@@ -25,11 +41,7 @@ gnome-extensions pack --force --extra-source=markdown.js
 gnome-extensions install --force sticky-notes@runnylogan.shell-extension.zip
 ```
 
-Log out and back in (Wayland), then enable it:
-
-```bash
-gnome-extensions enable sticky-notes@runnylogan
-```
+Then log out and back in and enable it as above.
 
 ## Licence
 
