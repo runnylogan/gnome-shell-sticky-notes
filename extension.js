@@ -203,6 +203,9 @@ class Note {
             style_class: 'sticky-note-hint',
             text: 'Write something…',
             reactive: false,
+            // BinLayout only honours alignment for expanding children.
+            x_expand: true,
+            y_expand: true,
             x_align: Clutter.ActorAlign.START,
             y_align: Clutter.ActorAlign.START,
         });
@@ -224,6 +227,7 @@ class Note {
             x_expand: true,
             y_expand: true,
             reactive: true,
+            enable_touch_scrolling: false,
         });
         this._scroll.set_child(content);
         // Clicking empty space under the text focuses the note at the end;
@@ -237,20 +241,16 @@ class Note {
         });
         click.connect('recognize', () => this.focus());
         this._scroll.add_action(click);
+        this._bodyClick = click;
         // Stretch the text to fill the visible body, so clicking or starting a
         // selection drag anywhere in the note lands in the text itself.
-        this._scroll.connect('notify::height', () => this._syncTextHeight());
+        const vadj = this._scroll.vadjustment;
+        vadj.connect('notify::page-size', () => this._syncTextHeight());
         this._entry.connect('style-changed', () => this._syncTextHeight());
 
-        // Keep the cursor in view while typing at the end of a long note.
-        const vadj = this._scroll.vadjustment;
-        vadj.connect('changed', () => {
-            if (!ct.has_key_focus())
-                return;
-            const pos = ct.get_cursor_position();
-            if (pos === -1 || pos >= ct.get_text().length)
-                vadj.value = Math.max(0, vadj.upper - vadj.page_size);
-        });
+        // Keep the cursor in view while typing or moving through a long note.
+        ct.connect('cursor-changed', () => this._ensureCursorVisible());
+        vadj.connect('changed', () => this._ensureCursorVisible());
 
         // Footer: resize grip
         const footer = new St.BoxLayout({x_expand: true});
@@ -285,6 +285,7 @@ class Note {
     _showEditor() {
         this._view.hide();
         this._editor.show();
+        this._bodyClick.enabled = false;
         this._syncHint();
     }
 
@@ -293,16 +294,41 @@ class Note {
     }
 
     _syncTextHeight() {
+        const page = this._scroll.vadjustment.page_size;
+        if (!(page > 0))
+            return;
         let vpad = 4;
         try {
             const node = this._entry.get_theme_node();
-            vpad = node.get_padding(St.Side.TOP) + node.get_padding(St.Side.BOTTOM) +
+            vpad = node.get_vertical_padding() +
                 node.get_border_width(St.Side.TOP) + node.get_border_width(St.Side.BOTTOM);
         } catch (_e) {}
-        const h = Math.max(0, Math.floor(this._scroll.height - vpad));
+        const h = Math.max(0, Math.floor(page - vpad));
         const ct = this._entry.clutter_text;
         if (ct.min_height !== h)
             ct.min_height = h;
+    }
+
+    _ensureCursorVisible() {
+        const ct = this._entry.clutter_text;
+        if (!this.isEditing || !ct.has_key_focus())
+            return;
+        const vadj = this._scroll.vadjustment;
+        let pos = ct.get_cursor_position();
+        if (pos < 0)
+            pos = [...ct.get_text()].length;
+        const [ok, , cy, lineHeight] = ct.position_to_coords(pos);
+        if (!ok)
+            return;
+        // Cursor position in the scrolled content's coordinates.
+        const [, ctY] = ct.get_transformed_position();
+        const [, viewY] = this._scroll.get_transformed_position();
+        const top = ctY - viewY + vadj.value + cy;
+        const bottom = top + lineHeight;
+        if (top < vadj.value)
+            vadj.value = Math.max(0, top);
+        else if (bottom > vadj.value + vadj.page_size)
+            vadj.value = Math.min(vadj.upper - vadj.page_size, bottom - vadj.page_size);
     }
 
     // ---- focus indication: darker border plus a blinking cursor
@@ -337,7 +363,13 @@ class Note {
                 this._blinkId = 0;
                 return GLib.SOURCE_REMOVE;
             }
-            ct.cursor_visible = !ct.cursor_visible;
+            // ClutterText paints the selection with the cursor, so hold
+            // steady while something is selected.
+            const bound = ct.get_selection_bound();
+            if (bound !== -1 && bound !== ct.get_cursor_position())
+                ct.cursor_visible = true;
+            else
+                ct.cursor_visible = !ct.cursor_visible;
             return GLib.SOURCE_CONTINUE;
         });
     }
@@ -371,6 +403,7 @@ class Note {
         }
         this._editor.hide();
         this._view.show();
+        this._bodyClick.enabled = true;
     }
 
     _onViewClick(gesture) {
@@ -674,6 +707,10 @@ export default class StickyNotesExtension extends Extension {
             GLib.source_remove(this._saveId);
             this._saveId = 0;
         }
+        if (this._focusLaterId) {
+            GLib.source_remove(this._focusLaterId);
+            this._focusLaterId = 0;
+        }
         this._saveNow();
 
         for (const note of this._notes.values()) {
@@ -783,6 +820,16 @@ export default class StickyNotesExtension extends Extension {
         if (!this.visible)
             this.setVisible(true);
         note.focus();
+        // Closing the panel menu hands focus back to whatever had it before,
+        // so focus the new note again once that has happened.
+        if (this._focusLaterId)
+            GLib.source_remove(this._focusLaterId);
+        this._focusLaterId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
+            this._focusLaterId = 0;
+            if (this._notes.has(data.id) && this._focusedNote() !== note)
+                note.focus();
+            return GLib.SOURCE_REMOVE;
+        });
         this.scheduleSave();
     }
 
