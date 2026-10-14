@@ -60,10 +60,6 @@
   font-size: 11pt;
 }
 
-.sticky-note .sticky-note-text StLabel.hint-text {
-  color: rgba(0, 0, 0, 0.4);
-}
-
 .sticky-note-grip {
   color: rgba(0, 0, 0, 0.3);
   font-size: 9pt;
@@ -72,6 +68,16 @@
 
 .sticky-note-grip:hover {
   color: rgba(0, 0, 0, 0.6);
+}
+
+.sticky-note.focused {
+  border-color: rgba(0, 0, 0, 0.45);
+}
+
+.sticky-note-hint {
+  padding: 2px 10px;
+  font-size: 11pt;
+  color: rgba(0, 0, 0, 0.4);
 }
 
 .sticky-note-view {

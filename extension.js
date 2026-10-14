@@ -4,6 +4,7 @@
 // Notes live in a layer above windows and below the top panel, are hidden in
 // the Overview, and are stored in ~/.local/share/sticky-notes/notes.json.
 
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
@@ -147,7 +148,6 @@ class Note {
         // Body: scrollable multi-line entry
         this._entry = new St.Entry({
             style_class: 'sticky-note-text',
-            hint_text: 'Write something…',
             can_focus: true,
             x_expand: true,
         });
@@ -159,13 +159,16 @@ class Note {
         ct.set_text(data.text ?? '');
         ct.connect('text-changed', () => {
             this.data.text = ct.get_text();
+            this._syncHint();
+            this.restartBlink();
             this._manager.scheduleSave();
         });
+        ct.connect('cursor-changed', () => this.restartBlink());
         const keys = new Clutter.KeyController();
         keys.connect('key-press', () => {
             const [, symbol] = keys.get_key();
             if (symbol === Clutter.KEY_Escape) {
-                global.stage.set_key_focus(null);
+                this._manager.releaseFocus();
                 return Clutter.EVENT_STOP;
             }
             return Clutter.EVENT_PROPAGATE;
@@ -194,7 +197,23 @@ class Note {
             orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
         });
-        content.add_child(this._entry);
+        // The placeholder sits over the top of the text area and ignores
+        // clicks, so they reach the text underneath.
+        this._hint = new St.Label({
+            style_class: 'sticky-note-hint',
+            text: 'Write something…',
+            reactive: false,
+            x_align: Clutter.ActorAlign.START,
+            y_align: Clutter.ActorAlign.START,
+        });
+        const editor = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
+            x_expand: true,
+        });
+        editor.add_child(this._entry);
+        editor.add_child(this._hint);
+        this._editor = editor;
+        content.add_child(editor);
         content.add_child(this._view);
 
         this._scroll = new St.ScrollView({
@@ -213,10 +232,16 @@ class Note {
         click.connect('may-recognize', () => {
             const event = click.get_point_event(0);
             const target = event ? global.stage.get_event_actor(event) : null;
-            return !(target && (this._entry.contains(target) || this._view.contains(target)));
+            const ct = this._entry.clutter_text;
+            return !(target && (target === ct || this._view.contains(target)));
         });
         click.connect('recognize', () => this.focus());
         this._scroll.add_action(click);
+        // Stretch the text to fill the visible body, so clicking or starting a
+        // selection drag anywhere in the note lands in the text itself.
+        this._scroll.connect('notify::height', () => this._syncTextHeight());
+        this._entry.connect('style-changed', () => this._syncTextHeight());
+
         // Keep the cursor in view while typing at the end of a long note.
         const vadj = this._scroll.vadjustment;
         vadj.connect('changed', () => {
@@ -254,12 +279,74 @@ class Note {
     // ---- Markdown view / editor switching
 
     get isEditing() {
-        return this._entry.visible;
+        return this._editor.visible;
     }
 
     _showEditor() {
         this._view.hide();
-        this._entry.show();
+        this._editor.show();
+        this._syncHint();
+    }
+
+    _syncHint() {
+        this._hint.visible = !this._entry.clutter_text.get_text();
+    }
+
+    _syncTextHeight() {
+        let vpad = 4;
+        try {
+            const node = this._entry.get_theme_node();
+            vpad = node.get_padding(St.Side.TOP) + node.get_padding(St.Side.BOTTOM) +
+                node.get_border_width(St.Side.TOP) + node.get_border_width(St.Side.BOTTOM);
+        } catch (_e) {}
+        const h = Math.max(0, Math.floor(this._scroll.height - vpad));
+        const ct = this._entry.clutter_text;
+        if (ct.min_height !== h)
+            ct.min_height = h;
+    }
+
+    // ---- focus indication: darker border plus a blinking cursor
+
+    setFocused(focused) {
+        if (focused === this._focused)
+            return;
+        this._focused = focused;
+        if (focused) {
+            this.actor.add_style_class_name('focused');
+            this.restartBlink();
+        } else {
+            this.actor.remove_style_class_name('focused');
+            this._stopBlink();
+        }
+    }
+
+    restartBlink() {
+        this._stopBlink();
+        if (!this._focused)
+            return;
+        const ct = this._entry.clutter_text;
+        ct.cursor_visible = true;
+        const blink = this._manager.blinkSettings;
+        if (!blink.enabled)
+            return;
+        const half = Math.max(100, Math.round(blink.time / 2));
+        const deadline = GLib.get_monotonic_time() + blink.timeout * 1000000;
+        this._blinkId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, half, () => {
+            if (GLib.get_monotonic_time() > deadline) {
+                ct.cursor_visible = true;
+                this._blinkId = 0;
+                return GLib.SOURCE_REMOVE;
+            }
+            ct.cursor_visible = !ct.cursor_visible;
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _stopBlink() {
+        if (this._blinkId) {
+            GLib.source_remove(this._blinkId);
+            this._blinkId = 0;
+        }
     }
 
     showRendered() {
@@ -282,7 +369,7 @@ class Note {
             this._tasks = new Map();
             this._view.clutter_text.set_text(text);
         }
-        this._entry.hide();
+        this._editor.hide();
         this._view.show();
     }
 
@@ -456,6 +543,7 @@ class Note {
 
     destroy() {
         this._endDrag();
+        this._stopBlink();
         if (this._confirmId) {
             GLib.source_remove(this._confirmId);
             this._confirmId = 0;
@@ -544,6 +632,8 @@ export default class StickyNotesExtension extends Extension {
         this._indicator.sync(this.visible);
 
         this._settings = this.getSettings();
+        this._interface = new Gio.Settings({schema_id: 'org.gnome.desktop.interface'});
+        this._prevWindow = null;
         const mode = Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW;
         Main.wm.addKeybinding('toggle-notes', this._settings,
             Meta.KeyBindingFlags.NONE, mode, () => this.setVisible(!this.visible));
@@ -556,15 +646,11 @@ export default class StickyNotesExtension extends Extension {
 
         // Bring a note to the front when its text gets focus.
         // Notes that lose focus go back to rendered Markdown.
-        this._connect(global.stage, 'notify::key-focus', () => {
-            const focus = global.stage.get_key_focus();
-            for (const note of this._notes.values()) {
-                const inside = focus && note.actor.contains(focus);
-                if (inside)
-                    note.raise();
-                else if (note.isEditing)
-                    note.showRendered();
-            }
+        this._connect(global.stage, 'notify::key-focus', () => this._onKeyFocusChanged());
+        // Clicking into any window hands the keyboard back to it.
+        this._connect(global.display, 'notify::focus-window', () => {
+            if (global.display.focus_window && this._focusedNote())
+                global.stage.set_key_focus(null);
         });
         this._connect(Main.overview, 'showing', () => this._syncLayer());
         this._connect(Main.overview, 'hidden', () => this._syncLayer());
@@ -605,12 +691,65 @@ export default class StickyNotesExtension extends Extension {
         this._indicator = null;
 
         this._settings = null;
+        this._interface = null;
+        this._prevWindow = null;
         this._state = null;
         this._store = null;
     }
 
     get visible() {
         return this._state.visible;
+    }
+
+    get blinkSettings() {
+        return {
+            enabled: this._interface.get_boolean('cursor-blink'),
+            time: this._interface.get_int('cursor-blink-time'),
+            timeout: this._interface.get_int('cursor-blink-timeout'),
+        };
+    }
+
+    _focusedNote() {
+        const focus = global.stage.get_key_focus();
+        if (!focus)
+            return null;
+        for (const note of this._notes.values()) {
+            if (note.actor.contains(focus))
+                return note;
+        }
+        return null;
+    }
+
+    _onKeyFocusChanged() {
+        const focused = this._focusedNote();
+        for (const note of this._notes.values()) {
+            if (note === focused) {
+                note.raise();
+                note.setFocused(true);
+            } else {
+                note.setFocused(false);
+                if (note.isEditing)
+                    note.showRendered();
+            }
+        }
+        // Typing goes to the note while it has focus, so show the app as
+        // inactive; remember it so Esc can return to it.
+        if (focused && global.display.focus_window) {
+            this._prevWindow = global.display.focus_window;
+            global.display.unset_input_focus(global.get_current_time());
+        }
+    }
+
+    // Leave the note (Esc) and give the keyboard back to the previous app.
+    releaseFocus() {
+        const win = this._prevWindow;
+        this._prevWindow = null;
+        global.stage.set_key_focus(null);
+        if (win) {
+            try {
+                win.activate(global.get_current_time());
+            } catch (_e) {}
+        }
     }
 
     setVisible(visible) {
