@@ -227,8 +227,11 @@ class Note {
             x_expand: true,
             y_expand: true,
             reactive: true,
-            enable_touch_scrolling: false,
         });
+        // GNOME 51 adds touch drag-to-scroll, which competes with text
+        // selection. Plain assignment is a harmless no-op on GNOME 50, where
+        // the property doesn't exist (as a constructor property it throws).
+        this._scroll.enable_touch_scrolling = false;
         this._scroll.set_child(content);
         // Clicking empty space under the text focuses the note at the end;
         // clicks on the text itself are left to the entry.
