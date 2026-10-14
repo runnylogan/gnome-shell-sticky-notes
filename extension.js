@@ -32,7 +32,7 @@ const TILE_MAX_W = 420;    // tiled notes never grow beyond this
 const TILE_MAX_H = 360;
 const CASCADE_STEP = 36;
 const ANIM_MS = 220;
-const TRASH_MAX = 10;     // closed notes kept for 'Restore last closed note'
+const TRASH_MAX = 10;     // closed notes kept for 'Restore Last Closed'
 
 function workArea() {
     const index = Main.layoutManager.primaryIndex;
@@ -333,17 +333,68 @@ class Note {
 
     // ---- focus indication: darker border plus a blinking cursor
 
-    setFocused(focused) {
+    setFocused(focused, zoom = false) {
         if (focused === this._focused)
             return;
         this._focused = focused;
         if (focused) {
             this.actor.add_style_class_name('focused');
             this.restartBlink();
+            if (zoom)
+                this.zoomIn();
         } else {
             this.actor.remove_style_class_name('focused');
             this._stopBlink();
+            this.zoomOut();
         }
+    }
+
+    // ---- Zoom On Edit: temporarily enlarge and centre the note while
+    // editing. Its saved position and size are left untouched.
+
+    get zoomed() {
+        return !!this._zoomed;
+    }
+
+    zoomIn() {
+        if (this._zoomed)
+            return;
+        this._zoomed = true;
+        this._setMovable(false);
+        this.raise();
+        this.actor.add_style_class_name('zoomed');
+        const area = workArea();
+        const w = Math.round(Math.min(area.width * 0.6, Math.max(this.data.w * 1.8, 560)));
+        const h = Math.round(Math.min(area.height * 0.7, Math.max(this.data.h * 1.8, 420)));
+        this._animateTo({
+            x: Math.round(area.x + (area.width - w) / 2),
+            y: Math.round(area.y + (area.height - h) / 2),
+            width: w,
+            height: h,
+        });
+    }
+
+    zoomOut() {
+        if (!this._zoomed)
+            return;
+        this._clearZoom();
+        this._animateTo({x: this.data.x, y: this.data.y, width: this.data.w, height: this.data.h});
+    }
+
+    _clearZoom() {
+        this._zoomed = false;
+        this._setMovable(true);
+        this.actor.remove_style_class_name('zoomed');
+    }
+
+    _setMovable(movable) {
+        for (const pan of this._pans ?? [])
+            pan.enabled = movable;
+    }
+
+    _animateTo(target) {
+        this.actor.remove_all_transitions();
+        this.actor.ease({...target, duration: ANIM_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
     }
 
     restartBlink() {
@@ -445,6 +496,8 @@ class Note {
     _makeDraggable(handle, onMove) {
         const pan = new Clutter.PanGesture();
         pan.set_begin_threshold(0);
+        this._pans ??= [];
+        this._pans.push(pan);
         // Work in absolute stage coordinates: the handle moves with the
         // note, so actor-relative deltas would stay near zero.
         pan.connect('recognize', () => {
@@ -493,6 +546,8 @@ class Note {
     }
 
     clampToScreen() {
+        if (this._zoomed)
+            return;
         // Keep at least the header reachable on some monitor.
         const [w] = this.actor.get_size();
         const {x, y} = this.actor;
@@ -539,6 +594,8 @@ class Note {
     }
 
     moveTo(geom, animate = true) {
+        if (this._zoomed)
+            this._clearZoom();
         Object.assign(this.data, {
             x: Math.round(geom.x), y: Math.round(geom.y),
             w: Math.round(geom.w), h: Math.round(geom.h),
@@ -615,21 +672,28 @@ class StickyNotesIndicator extends PanelMenu.Button {
         right.connect('recognize', () => this.menu.toggle());
         this.add_action(right);
 
-        this.menu.addAction('New note', () => ext.newNote());
-        this._undelete = this.menu.addAction('Restore last closed note', () => ext.restoreClosed());
+        this.menu.addAction('New Note', () => ext.newNote());
+        this._undelete = this.menu.addAction('Restore Last Closed', () => ext.restoreClosed());
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Arrange'));
         this.menu.addAction('Tile', () => ext.arrange('tile'));
         this.menu.addAction('Cascade', () => ext.arrange('cascade'));
-        this._restore = this.menu.addAction('Restore previous layout', () => ext.restoreLayout());
+        this._restore = this.menu.addAction('Restore Layout', () => ext.restoreLayout());
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Options'));
+        this._zoom = new PopupMenu.PopupSwitchMenuItem('Zoom On Edit', false);
+        this._zoom.connect('toggled', (_item, state) => {
+            ext.zoomOnEdit = state;
+        });
+        this.menu.addMenuItem(this._zoom);
 
         this.menu.connect('open-state-changed', (_m, open) => {
             if (open) {
                 this._restore.setSensitive(ext.canRestore);
                 const n = ext.closedCount;
                 this._undelete.label.text = n > 0
-                    ? `Restore last closed note (${n})`
-                    : 'Restore last closed note';
+                    ? `Restore Last Closed (${n})`
+                    : 'Restore Last Closed';
                 this._undelete.setSensitive(n > 0);
+                this._zoom.setToggleState(ext.zoomOnEdit);
             }
         });
     }
@@ -680,6 +744,7 @@ export default class StickyNotesExtension extends Extension {
         // Bring a note to the front when its text gets focus.
         // Notes that lose focus go back to rendered Markdown.
         this._connect(global.stage, 'notify::key-focus', () => this._onKeyFocusChanged());
+        this._connect(this._settings, 'changed::zoom-on-edit', () => this._onZoomSettingChanged());
         // Clicking into any window hands the keyboard back to it.
         this._connect(global.display, 'notify::focus-window', () => {
             if (global.display.focus_window && this._focusedNote())
@@ -738,6 +803,24 @@ export default class StickyNotesExtension extends Extension {
         return this._state.visible;
     }
 
+    get zoomOnEdit() {
+        return this._settings.get_boolean('zoom-on-edit');
+    }
+
+    set zoomOnEdit(value) {
+        this._settings.set_boolean('zoom-on-edit', value);
+    }
+
+    _onZoomSettingChanged() {
+        const focused = this._focusedNote();
+        for (const note of this._notes.values()) {
+            if (this.zoomOnEdit && note === focused)
+                note.zoomIn();
+            else
+                note.zoomOut();
+        }
+    }
+
     get blinkSettings() {
         return {
             enabled: this._interface.get_boolean('cursor-blink'),
@@ -762,7 +845,7 @@ export default class StickyNotesExtension extends Extension {
         for (const note of this._notes.values()) {
             if (note === focused) {
                 note.raise();
-                note.setFocused(true);
+                note.setFocused(true, this.zoomOnEdit);
             } else {
                 note.setFocused(false);
                 if (note.isEditing)

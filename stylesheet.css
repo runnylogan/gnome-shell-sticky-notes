@@ -74,6 +74,11 @@
   border-color: rgba(0, 0, 0, 0.45);
 }
 
+.sticky-note.zoomed .sticky-note-text,
+.sticky-note.zoomed .sticky-note-hint {
+  font-size: 14pt;
+}
+
 .sticky-note-hint {
   padding: 2px 10px;
   font-size: 11pt;

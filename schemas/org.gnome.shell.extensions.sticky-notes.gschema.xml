@@ -9,5 +9,9 @@
       <default><![CDATA[['<Super><Alt>n']]]></default>
       <summary>Create a new note</summary>
     </key>
+    <key name="zoom-on-edit" type="b">
+      <default>false</default>
+      <summary>Enlarge and centre a note while it is being edited</summary>
+    </key>
   </schema>
 </schemalist>
