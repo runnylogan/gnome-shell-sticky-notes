@@ -1083,6 +1083,17 @@ export default class StickyNotesExtension extends Extension {
             this._state.savedLayout = notes.map(n => ({
                 id: n.data.id, x: n.data.x, y: n.data.y, w: n.data.w, h: n.data.h,
             }));
+        } else if (kind !== 'tile' && this.canRestore) {
+            // Only Tile resizes notes: the others use the sizes from before
+            // the run, not ones an earlier Tile left behind.
+            const saved = new Map(this._state.savedLayout.map(g => [g.id, g]));
+            for (const n of notes) {
+                const g = saved.get(n.data.id);
+                if (g) {
+                    n.data.w = g.w;
+                    n.data.h = g.h;
+                }
+            }
         }
         this._state.arranged = true;
 
@@ -1158,7 +1169,17 @@ export default class StickyNotesExtension extends Extension {
         }));
     }
 
+    // Cascade from the top-left, with the step shrunk to fit the screen. If
+    // that would leave a note unclickable, fall back to overlapping rows.
     _cascadeLayout(notes, area) {
+        const stack = this._centredCascade(notes, area, area.x, area.y);
+        if (stack && this._allSelectable(stack.map(p => p.g), area))
+            return stack.map(p => p.g);
+        return this._stairLayout(notes, area).map(p => p.g);
+    }
+
+    // Plain cascade that wraps back to the top-left when it runs out of room.
+    _wrapCascade(notes, area) {
         let x = area.x + GAP, y = area.y + GAP;
         return notes.map(n => {
             const w = n.data.w, h = n.data.h;
@@ -1267,7 +1288,7 @@ export default class StickyNotesExtension extends Extension {
             }
         }
         // Hundreds of notes on a tiny screen: plain cascade.
-        const geoms = this._cascadeLayout(notes, area);
+        const geoms = this._wrapCascade(notes, area);
         return notes.map((note, i) => ({note, g: geoms[i]}));
     }
 
