@@ -60,6 +60,32 @@ function bounds(rects) {
     return {x, y, w: x2 - x, h: y2 - y};
 }
 
+// Stage coordinates of a gesture's first point, from its event (the
+// gesture classes' own coordinate getters differ between GNOME versions).
+function gesturePoint(gesture) {
+    const [x, y] = gesture.get_point_event(0).get_coords();
+    return {x, y};
+}
+
+// Character position in a ClutterText nearest the actor-relative point
+// (lx, ly). coords_to_position() returns a byte offset on GNOME 50, while
+// positions everywhere else count characters; read it both ways and keep
+// whichever lands closer to the point, so either behaviour works.
+function textPositionAt(ct, lx, ly) {
+    const raw = ct.coords_to_position(lx, ly);
+    if (raw <= 0)
+        return raw;
+    const bytes = new TextEncoder().encode(ct.get_text());
+    const fromBytes = [...new TextDecoder().decode(bytes.slice(0, raw))].length;
+    if (fromBytes === raw)
+        return raw;
+    const distance = pos => {
+        const [ok, x, y, lineHeight] = ct.position_to_coords(pos);
+        return ok ? Math.abs(y + lineHeight / 2 - ly) * 1000 + Math.abs(x - lx) : Infinity;
+    };
+    return distance(raw) < distance(fromBytes) ? raw : fromBytes;
+}
+
 function setActorCursor(actor, ...names) {
     // Per-actor cursors (as St.Entry uses for its text cursor). Names are
     // tried in order; fail quietly if this Clutter lacks them.
@@ -254,15 +280,31 @@ class Note {
         // empty space around them (all of an empty note) land here: focus
         // the note with the cursor nearest the click. Clicks on the text
         // itself are left to the entry.
-        const click = new Clutter.ClickGesture();
-        click.connect('may-recognize', () => {
-            const event = click.get_point_event(0);
+        const offText = gesture => {
+            const event = gesture.get_point_event(0);
             const target = event ? global.stage.get_event_actor(event) : null;
             const ct = this._entry.clutter_text;
             return !(target && (target === ct || this._view.contains(target)));
-        });
+        };
+        const click = new Clutter.ClickGesture();
+        click.connect('may-recognize', () => offText(click));
         click.connect('recognize', () => this._onBodyClick(click));
         this._scroll.add_action(click);
+        // Likewise, a drag that starts in that space selects text, from the
+        // position nearest where it started to the one nearest the pointer.
+        const drag = new Clutter.PanGesture();
+        drag.connect('may-recognize', () => this.isEditing && offText(drag));
+        drag.connect('recognize', () => {
+            const pos = this._textPositionAt(drag.get_begin_centroid_abs());
+            this.raise();
+            ct.grab_key_focus();
+            ct.set_cursor_position(pos);
+            ct.set_selection_bound(pos);
+        });
+        drag.connect('pan-update', () => {
+            ct.set_cursor_position(this._textPositionAt(drag.get_centroid_abs()));
+        });
+        this._scroll.add_action(drag);
         // Stretch the text to fill the visible body, so clicking or starting a
         // selection drag anywhere in the note lands in the text itself.
         const vadj = this._scroll.vadjustment;
@@ -503,9 +545,9 @@ class Note {
                 return GLib.SOURCE_REMOVE;
             }
             // ClutterText paints the selection with the cursor, so hold
-            // steady while something is selected.
-            const bound = ct.get_selection_bound();
-            if (bound !== -1 && bound !== ct.get_cursor_position())
+            // steady while something is selected. (Positions can't be
+            // compared for this: -1 means the end of the text in both.)
+            if (ct.get_selection())
                 ct.cursor_visible = true;
             else
                 ct.cursor_visible = !ct.cursor_visible;
@@ -544,21 +586,26 @@ class Note {
         this._view.show();
     }
 
+    // Text position nearest a stage point (-1, the end, if it can't be mapped).
+    _textPositionAt(point) {
+        const ct = this._entry.clutter_text;
+        try {
+            const [ok, lx, ly] = ct.transform_stage_point(point.x, point.y);
+            if (ok)
+                return textPositionAt(ct, lx, ly);
+        } catch (e) {
+            console.debug(`[sticky-notes] point mapping failed: ${e}`);
+        }
+        return -1;
+    }
+
     _onBodyClick(gesture) {
         if (!this.isEditing) {
             this.focus();
             return;
         }
         const ct = this._entry.clutter_text;
-        let pos = -1;
-        try {
-            const point = gesture.get_point_coords_abs(0);
-            const [ok, lx, ly] = ct.transform_stage_point(point.x, point.y);
-            if (ok)
-                pos = ct.coords_to_position(lx, ly);
-        } catch (e) {
-            console.debug(`[sticky-notes] click mapping failed: ${e}`);
-        }
+        const pos = this._textPositionAt(gesturePoint(gesture));
         this.raise();
         ct.grab_key_focus();
         ct.set_cursor_position(pos);
@@ -569,11 +616,11 @@ class Note {
         // Work out which displayed line/column was clicked.
         let line = -1, column = -1;
         try {
-            const point = gesture.get_point_coords_abs(0);
+            const point = gesturePoint(gesture);
             const vt = this._view.clutter_text;
             const [ok, lx, ly] = vt.transform_stage_point(point.x, point.y);
             if (ok) {
-                const pos = vt.coords_to_position(lx, ly);
+                const pos = textPositionAt(vt, lx, ly);
                 const before = [...vt.get_text()].slice(0, pos).join('').split('\n');
                 line = before.length - 1;
                 column = [...before[before.length - 1]].length;
@@ -859,6 +906,18 @@ export default class StickyNotesExtension extends Extension {
         this._connect(global.display, 'notify::focus-window', () => {
             if (global.display.focus_window && this._focusedNote())
                 global.stage.set_key_focus(null);
+        });
+        // Clicking anywhere else outside the notes (the desktop, the panel)
+        // leaves the note, as Esc does. The click itself carries on.
+        this._connect(global.stage, 'captured-event', (_stage, event) => {
+            const type = event.type();
+            if ((type === Clutter.EventType.BUTTON_PRESS ||
+                 type === Clutter.EventType.TOUCH_BEGIN) && this._focusedNote()) {
+                const target = global.stage.get_event_actor(event);
+                if (!target || !this._layer.contains(target))
+                    this.releaseFocus();
+            }
+            return Clutter.EVENT_PROPAGATE;
         });
         this._connect(Main.overview, 'showing', () => this._syncLayer());
         this._connect(Main.overview, 'hidden', () => this._syncLayer());
