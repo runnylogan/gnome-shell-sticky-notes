@@ -31,8 +31,12 @@ const GAP = 16;            // spacing between notes when placing/arranging
 const TILE_MAX_W = 420;    // tiled notes never grow beyond this
 const TILE_MAX_H = 360;
 const CASCADE_STEP = 36;
+const HEADER_H = 28;      // note title bar: buttons and drag handle
+const SELECT_MIN = 24;    // smallest uncovered patch that still takes a click
+const HEADER_LEFT = 56;   // colour and new-note buttons, left of the drag handle
+const HEADER_RIGHT = 32;  // close button, right of the drag handle
 const ANIM_MS = 220;
-const TRASH_MAX = 10;     // closed notes kept for 'Restore Last Closed'
+const TRASH_MAX = 10;     // closed notes kept for 'Restore Closed'
 
 function workArea() {
     const index = Main.layoutManager.primaryIndex;
@@ -42,6 +46,18 @@ function workArea() {
 function intersects(a, b, gap = 0) {
     return a.x < b.x + b.w + gap && b.x < a.x + a.w + gap &&
            a.y < b.y + b.h + gap && b.y < a.y + a.h + gap;
+}
+
+function clamp(v, lo, hi) {
+    return Math.max(lo, Math.min(v, hi));
+}
+
+function bounds(rects) {
+    const x = Math.min(...rects.map(r => r.x));
+    const y = Math.min(...rects.map(r => r.y));
+    const x2 = Math.max(...rects.map(r => r.x + r.w));
+    const y2 = Math.max(...rects.map(r => r.y + r.h));
+    return {x, y, w: x2 - x, h: y2 - y};
 }
 
 function setActorCursor(actor, ...names) {
@@ -297,6 +313,8 @@ class Note {
     }
 
     _syncTextHeight() {
+        if (this._animating)
+            return;
         const page = this._scroll.vadjustment.page_size;
         if (!(page > 0))
             return;
@@ -314,7 +332,7 @@ class Note {
 
     _ensureCursorVisible() {
         const ct = this._entry.clutter_text;
-        if (!this.isEditing || !ct.has_key_focus())
+        if (this._animating || !this.isEditing || !ct.has_key_focus())
             return;
         const vadj = this._scroll.vadjustment;
         let pos = ct.get_cursor_position();
@@ -344,10 +362,11 @@ class Note {
             this.actor.add_style_class_name('focused');
             this.restartBlink();
             if (zoom)
-                this.zoomIn();
+                this._zoomLater();
         } else {
             this.actor.remove_style_class_name('focused');
             this._stopBlink();
+            this._cancelZoomLater();
             this.zoomOut();
         }
     }
@@ -359,21 +378,44 @@ class Note {
         return !!this._zoomed;
     }
 
+    // Zoom once the click (or menu close) that gave the note focus has been
+    // fully handled, so it doesn't race the text's own press handling.
+    _zoomLater() {
+        this._cancelZoomLater();
+        this._zoomId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._zoomId = 0;
+            if (this._focused && this._manager.zoomOnEdit)
+                this.zoomIn();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _cancelZoomLater() {
+        if (this._zoomId) {
+            GLib.source_remove(this._zoomId);
+            this._zoomId = 0;
+        }
+    }
+
     zoomIn() {
         if (this._zoomed)
             return;
         this._zoomed = true;
         this._setMovable(false);
         this.raise();
-        this.actor.add_style_class_name('zoomed');
         const area = workArea();
         const w = Math.round(Math.min(area.width * 0.6, Math.max(this.data.w * 1.8, 560)));
         const h = Math.round(Math.min(area.height * 0.7, Math.max(this.data.h * 1.8, 420)));
+        // Grow first, then switch to the larger text, so the text is never
+        // laid out against a half-resized note.
         this._animateTo({
             x: Math.round(area.x + (area.width - w) / 2),
             y: Math.round(area.y + (area.height - h) / 2),
             width: w,
             height: h,
+        }, () => {
+            if (this._zoomed)
+                this.actor.add_style_class_name('zoomed');
         });
     }
 
@@ -395,9 +437,43 @@ class Note {
             pan.enabled = movable;
     }
 
-    _animateTo(target) {
+    // While the note is animating, its text sizing and scroll-to-cursor
+    // are paused; both are brought up to date once it has settled.
+    _animateTo(target, onDone = null) {
+        const gen = (this._animGen ?? 0) + 1;
+        this._animGen = gen;
+        this._animating = true;
         this.actor.remove_all_transitions();
-        this.actor.ease({...target, duration: ANIM_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
+        this.actor.ease({
+            ...target,
+            duration: ANIM_MS,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            onStopped: () => {
+                if (gen !== this._animGen)
+                    return;
+                this._animating = false;
+                onDone?.();
+                this._settle();
+            },
+        });
+    }
+
+    _setGeometry(target) {
+        this._animGen = (this._animGen ?? 0) + 1;
+        this._animating = false;
+        this.actor.remove_all_transitions();
+        this.actor.set(target);
+        this._settle();
+    }
+
+    _settle() {
+        this._syncTextHeight();
+        if (!this.isEditing)
+            return;
+        // Scroll back to the top, then bring the cursor into view.
+        this._scroll.vadjustment.value = 0;
+        this._ensureCursorVisible();
+        this.restartBlink();
     }
 
     restartBlink() {
@@ -604,11 +680,10 @@ class Note {
             w: Math.round(geom.w), h: Math.round(geom.h),
         });
         const target = {x: this.data.x, y: this.data.y, width: this.data.w, height: this.data.h};
-        this.actor.remove_all_transitions();
         if (animate)
-            this.actor.ease({...target, duration: ANIM_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
+            this._animateTo(target);
         else
-            this.actor.set(target);
+            this._setGeometry(target);
     }
 
     raise() {
@@ -637,6 +712,8 @@ class Note {
     destroy() {
         this._endDrag();
         this._stopBlink();
+        this._cancelZoomLater();
+        this._animGen = (this._animGen ?? 0) + 1;
         if (this._confirmId) {
             GLib.source_remove(this._confirmId);
             this._confirmId = 0;
@@ -676,10 +753,11 @@ class StickyNotesIndicator extends PanelMenu.Button {
         this.add_action(right);
 
         this.menu.addAction('New Note', () => ext.newNote());
-        this._undelete = this.menu.addAction('Restore Last Closed', () => ext.restoreClosed());
+        this._undelete = this.menu.addAction('Restore Closed', () => ext.restoreClosed());
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Arrange'));
         this.menu.addAction('Tile', () => ext.arrange('tile'));
         this.menu.addAction('Cascade', () => ext.arrange('cascade'));
+        this.menu.addAction('Gather', () => ext.arrange('gather'));
         this._restore = this.menu.addAction('Restore Layout', () => ext.restoreLayout());
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Options'));
         this._zoom = new PopupMenu.PopupSwitchMenuItem('Zoom On Edit', false);
@@ -693,8 +771,8 @@ class StickyNotesIndicator extends PanelMenu.Button {
                 this._restore.setSensitive(ext.canRestore);
                 const n = ext.closedCount;
                 this._undelete.label.text = n > 0
-                    ? `Restore Last Closed (${n})`
-                    : 'Restore Last Closed';
+                    ? `Restore Closed (${n})`
+                    : 'Restore Closed';
                 this._undelete.setSensitive(n > 0);
                 this._zoom.setToggleState(ext.zoomOnEdit);
             }
@@ -980,13 +1058,25 @@ export default class StickyNotesExtension extends Extension {
         this._state.arranged = true;
 
         const area = workArea();
-        const geoms = kind === 'tile'
-            ? this._tileLayout(notes.length, area)
-            : this._cascadeLayout(notes, area);
-        notes.forEach((n, i) => {
-            n.moveTo(geoms[i]);
-            n.raise();
-        });
+        let placed;
+        if (kind === 'gather') {
+            placed = this._gatherLayout(notes, area);
+        } else {
+            const geoms = kind === 'tile'
+                ? this._tileLayout(notes.length, area)
+                : this._cascadeLayout(notes, area);
+            placed = notes.map((note, i) => ({note, g: geoms[i]}));
+        }
+        // Stack in layout order, and keep that order across restarts.
+        for (const {note, g} of placed) {
+            note.moveTo(g);
+            note.raise();
+        }
+        const ids = new Set(placed.map(p => p.note.data.id));
+        this._state.notes = [
+            ...this._state.notes.filter(d => !ids.has(d.id)),
+            ...placed.map(p => p.note.data),
+        ];
         if (!this.visible)
             this.setVisible(true);
         this.scheduleSave();
@@ -1051,6 +1141,201 @@ export default class StickyNotesExtension extends Extension {
             x += CASCADE_STEP;
             y += CASCADE_STEP;
             return g;
+        });
+    }
+
+    // Gather: keep every note's size and pack them, largest first, as close
+    // to the centre as they go without overlapping. Notes that don't fit
+    // are cascaded on top. Whatever happens, every note keeps an uncovered
+    // patch big enough to click, so none is lost under the others.
+    _gatherLayout(notes, area) {
+        const cx = area.x + area.width / 2;
+        const cy = area.y + area.height / 2;
+        const bySize = [...notes].sort((a, b) => b.data.w * b.data.h - a.data.w * a.data.h);
+        let placed = [];
+        const overflow = [];
+        for (const note of bySize) {
+            const g = this._nearestFree(note.data.w, note.data.h, placed.map(p => p.g), area, cx, cy);
+            if (g)
+                placed.push({note, g});
+            else
+                overflow.push(note);
+        }
+
+        // Centre the group as a whole (it fits, so the shift stays on screen).
+        if (placed.length > 0) {
+            const b = bounds(placed.map(p => p.g));
+            const dx = Math.round(clamp(cx - (b.x + b.w / 2),
+                area.x + GAP - b.x, area.x + area.width - GAP - (b.x + b.w)));
+            const dy = Math.round(clamp(cy - (b.y + b.h / 2),
+                area.y + GAP - b.y, area.y + area.height - GAP - (b.y + b.h)));
+            placed = placed.map(({note, g}) => ({note, g: {...g, x: g.x + dx, y: g.y + dy}}));
+        }
+        if (overflow.length === 0)
+            return placed;
+
+        // Cascade the rest on top: over the centre if that leaves every note
+        // clickable, otherwise beside the group.
+        const stack = this._centredCascade(overflow, area, cx, cy);
+        if (stack) {
+            const s = bounds(stack.map(p => p.g));
+            const b = placed.length > 0 ? bounds(placed.map(p => p.g)) : null;
+            const anchors = [[cx, cy]];
+            if (b) {
+                anchors.push(
+                    [b.x + b.w + GAP + s.w / 2, cy],
+                    [b.x - GAP - s.w / 2, cy],
+                    [cx, b.y + b.h + GAP + s.h / 2],
+                    [cx, b.y - GAP - s.h / 2]);
+            }
+            for (const [ax, ay] of anchors) {
+                const result = [...placed, ...this._centredCascade(overflow, area, ax, ay)];
+                if (this._allSelectable(result.map(p => p.g), area))
+                    return result;
+            }
+        }
+
+        // Too crowded to mix: cascade every note from the centre instead.
+        const all = this._centredCascade(bySize, area, cx, cy);
+        if (all && this._allSelectable(all.map(p => p.g), area))
+            return all;
+
+        // Last resort: rows of overlapping notes, each drag handle uncovered.
+        return this._stairLayout(bySize, area);
+    }
+
+    // Lay notes out in rows and columns, overlapping only as much as the
+    // space requires: each note's drag handle stays clear of the notes to
+    // its right and the rows below. When even that won't fit, notes may run
+    // off the right or bottom edge, but their handles stay on screen.
+    _stairLayout(notes, area) {
+        const n = notes.length;
+        const handle = HEADER_LEFT + SELECT_MIN;
+        const maxW = Math.max(...notes.map(note => note.data.w));
+        const maxH = Math.max(...notes.map(note => note.data.h));
+        const W = area.width - 2 * GAP, H = area.height - 2 * GAP;
+        for (const [spanW, spanH] of [[maxW, maxH], [handle, HEADER_H]]) {
+            for (let rows = 1; rows <= n; rows++) {
+                const cols = Math.ceil(n / rows);
+                const sx = cols > 1 ? Math.floor((W - spanW) / (cols - 1)) : 0;
+                const sy = rows > 1 ? Math.floor((H - spanH) / (rows - 1)) : 0;
+                if ((cols > 1 && sx < handle) || (rows > 1 && sy < HEADER_H) ||
+                    spanW > W || spanH > H)
+                    continue;
+                const dx = Math.min(sx, maxW + GAP), dy = Math.min(sy, maxH + GAP);
+                const gridW = (cols - 1) * dx + maxW, gridH = (rows - 1) * dy + maxH;
+                const x0 = area.x + Math.max(GAP, Math.round((area.width - gridW) / 2));
+                const y0 = area.y + Math.max(GAP, Math.round((area.height - gridH) / 2));
+                return notes.map((note, i) => ({
+                    note,
+                    g: {
+                        x: x0 + (i % cols) * dx,
+                        y: y0 + Math.floor(i / cols) * dy,
+                        w: note.data.w,
+                        h: note.data.h,
+                    },
+                }));
+            }
+        }
+        // Hundreds of notes on a tiny screen: plain cascade.
+        const geoms = this._cascadeLayout(notes, area);
+        return notes.map((note, i) => ({note, g: geoms[i]}));
+    }
+
+    // Free spot for a w×h note nearest (cx, cy), or null if none. Besides a
+    // coarse grid, tries spots flush against the notes already placed, so
+    // the group packs tightly.
+    _nearestFree(w, h, rects, area, cx, cy) {
+        const x0 = area.x + GAP, x1 = area.x + area.width - GAP - w;
+        const y0 = area.y + GAP, y1 = area.y + area.height - GAP - h;
+        if (x1 < x0 || y1 < y0)
+            return null;
+        const xs = new Set([x0, x1, Math.round(cx - w / 2)]);
+        const ys = new Set([y0, y1, Math.round(cy - h / 2)]);
+        const step = 32;
+        // Measure distance in screen proportions, so the group spreads to
+        // the screen's shape rather than into a tall column.
+        const aspect = area.width / area.height;
+        for (let x = x0; x < x1; x += step)
+            xs.add(x);
+        for (let y = y0; y < y1; y += step)
+            ys.add(y);
+        for (const r of rects) {
+            for (const x of [r.x + r.w + GAP, r.x - GAP - w, r.x, r.x + r.w - w])
+                xs.add(x);
+            for (const y of [r.y + r.h + GAP, r.y - GAP - h, r.y, r.y + r.h - h])
+                ys.add(y);
+        }
+        const candidates = [];
+        for (const x of xs) {
+            if (x < x0 || x > x1)
+                continue;
+            for (const y of ys) {
+                if (y >= y0 && y <= y1)
+                    candidates.push({x, y, d: (x + w / 2 - cx) ** 2 + ((y + h / 2 - cy) * aspect) ** 2});
+            }
+        }
+        candidates.sort((a, b) => a.d - b.d);
+        for (const c of candidates) {
+            const r = {x: c.x, y: c.y, w, h};
+            if (!rects.some(o => intersects(r, o, GAP)))
+                return r;
+        }
+        return null;
+    }
+
+    // Cascade centred on (ax, ay), with steps shrunk to fit the screen but
+    // never below a title bar's height, so each title bar stays uncovered.
+    // Returns null if the notes can't be spread that far.
+    _centredCascade(notes, area, ax, ay) {
+        const n = notes.length;
+        const maxW = Math.max(...notes.map(note => note.data.w));
+        const maxH = Math.max(...notes.map(note => note.data.h));
+        let sx = 0, sy = 0;
+        if (n > 1) {
+            sx = clamp(Math.floor((area.width - 2 * GAP - maxW) / (n - 1)), 0, CASCADE_STEP);
+            sy = Math.min(CASCADE_STEP, Math.floor((area.height - 2 * GAP - maxH) / (n - 1)));
+            if (sy < HEADER_H)
+                return null;
+        }
+        const spanW = (n - 1) * sx + maxW;
+        const spanH = (n - 1) * sy + maxH;
+        // Prefer the top-left edge if the stack is wider than the screen.
+        const x0 = Math.round(Math.max(area.x + GAP,
+            Math.min(ax - spanW / 2, area.x + area.width - GAP - spanW)));
+        const y0 = Math.round(Math.max(area.y + GAP,
+            Math.min(ay - spanH / 2, area.y + area.height - GAP - spanH)));
+        return notes.map((note, i) => ({
+            note,
+            g: {x: x0 + i * sx, y: y0 + i * sy, w: note.data.w, h: note.data.h},
+        }));
+    }
+
+    // True if every note (listed bottom to top) keeps an on-screen patch,
+    // uncovered by the notes above it, that a click would land on: its drag
+    // handle or its body (not just a header button).
+    _allSelectable(geoms, area) {
+        const c = SELECT_MIN;
+        return geoms.every((g, i) => {
+            const above = geoms.slice(i + 1);
+            const free = r => !above.some(o => intersects(r, o));
+            // The left end of the drag handle first, then anywhere else.
+            const grip = {x: g.x + HEADER_LEFT, y: g.y, w: c, h: c};
+            if (grip.x >= area.x && grip.x + c <= area.x + area.width &&
+                grip.y >= area.y && grip.y + c <= area.y + area.height && free(grip))
+                return true;
+            const left = Math.max(g.x, area.x), right = Math.min(g.x + g.w, area.x + area.width);
+            const top = Math.max(g.y, area.y), bottom = Math.min(g.y + g.h, area.y + area.height);
+            for (let y = top; y + c <= bottom; y += c / 2) {
+                for (let x = left; x + c <= right; x += c / 2) {
+                    // Colour and new buttons on the left, close on the right.
+                    if (y < g.y + HEADER_H && (x < g.x + HEADER_LEFT || x + c > g.x + g.w - HEADER_RIGHT))
+                        continue;
+                    if (free({x, y, w: c, h: c}))
+                        return true;
+                }
+            }
+            return false;
         });
     }
 
