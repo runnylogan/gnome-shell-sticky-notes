@@ -380,7 +380,7 @@ class Note {
         }
     }
 
-    // ---- Zoom On Edit: temporarily enlarge and centre the note while
+    // ---- Focus On Edit: temporarily enlarge and centre the note while
     // editing. Its saved position and size are left untouched.
 
     get zoomed() {
@@ -789,7 +789,7 @@ class StickyNotesIndicator extends PanelMenu.Button {
         this.menu.addAction('Gather', () => ext.arrange('gather'));
         this._restore = this.menu.addAction('Restore Layout', () => ext.restoreLayout());
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Options'));
-        this._zoom = new PopupMenu.PopupSwitchMenuItem('Zoom On Edit', false);
+        this._zoom = new PopupMenu.PopupSwitchMenuItem('Focus On Edit', false);
         this._zoom.connect('toggled', (_item, state) => {
             ext.zoomOnEdit = state;
         });
