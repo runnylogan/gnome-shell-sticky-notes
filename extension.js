@@ -176,6 +176,7 @@ class Note {
         ct.connect('text-changed', () => {
             this.data.text = ct.get_text();
             this._syncHint();
+            this._syncTextHeight();
             this.restartBlink();
             this._manager.scheduleSave();
         });
@@ -249,8 +250,10 @@ class Note {
         // the property doesn't exist (as a constructor property it throws).
         this._scroll.enable_touch_scrolling = false;
         this._scroll.set_child(content);
-        // Clicking empty space under the text focuses the note at the end;
-        // clicks on the text itself are left to the entry.
+        // ClutterText only takes clicks on its characters, so clicks on the
+        // empty space around them (all of an empty note) land here: focus
+        // the note with the cursor nearest the click. Clicks on the text
+        // itself are left to the entry.
         const click = new Clutter.ClickGesture();
         click.connect('may-recognize', () => {
             const event = click.get_point_event(0);
@@ -258,14 +261,14 @@ class Note {
             const ct = this._entry.clutter_text;
             return !(target && (target === ct || this._view.contains(target)));
         });
-        click.connect('recognize', () => this.focus());
+        click.connect('recognize', () => this._onBodyClick(click));
         this._scroll.add_action(click);
-        this._bodyClick = click;
         // Stretch the text to fill the visible body, so clicking or starting a
         // selection drag anywhere in the note lands in the text itself.
         const vadj = this._scroll.vadjustment;
         vadj.connect('notify::page-size', () => this._syncTextHeight());
         this._entry.connect('style-changed', () => this._syncTextHeight());
+        ct.connect('notify::width', () => this._syncTextHeight());
 
         // Keep the cursor in view while typing or moving through a long note.
         ct.connect('cursor-changed', () => this._ensureCursorVisible());
@@ -304,7 +307,6 @@ class Note {
     _showEditor() {
         this._view.hide();
         this._editor.show();
-        this._bodyClick.enabled = false;
         this._syncHint();
     }
 
@@ -313,9 +315,7 @@ class Note {
     }
 
     _syncTextHeight() {
-        if (this._animating)
-            return;
-        const page = this._scroll.vadjustment.page_size;
+        const page = Math.floor(this._scroll.vadjustment.page_size);
         if (!(page > 0))
             return;
         let vpad = 4;
@@ -324,10 +324,19 @@ class Note {
             vpad = node.get_vertical_padding() +
                 node.get_border_width(St.Side.TOP) + node.get_border_width(St.Side.BOTTOM);
         } catch (_e) {}
-        const h = Math.max(0, Math.floor(page - vpad));
+        // Size the entry and its text together: at least the visible body,
+        // and tall enough for all the text so the view can scroll. St.Entry
+        // otherwise sizes itself to one line and centres the taller text on
+        // it, pushing the top of the text out of view.
         const ct = this._entry.clutter_text;
+        const h = Math.max(0, page - vpad);
         if (ct.min_height !== h)
             ct.min_height = h;
+        const width = ct.width > 0 ? ct.width : -1;
+        const [, textH] = ct.get_preferred_height(width);
+        const entryH = Math.ceil(Math.max(h, textH) + vpad);
+        if (this._entry.min_height !== entryH)
+            this._entry.min_height = entryH;
     }
 
     _ensureCursorVisible() {
@@ -533,7 +542,27 @@ class Note {
         }
         this._editor.hide();
         this._view.show();
-        this._bodyClick.enabled = true;
+    }
+
+    _onBodyClick(gesture) {
+        if (!this.isEditing) {
+            this.focus();
+            return;
+        }
+        const ct = this._entry.clutter_text;
+        let pos = -1;
+        try {
+            const point = gesture.get_point_coords_abs(0);
+            const [ok, lx, ly] = ct.transform_stage_point(point.x, point.y);
+            if (ok)
+                pos = ct.coords_to_position(lx, ly);
+        } catch (e) {
+            console.debug(`[sticky-notes] click mapping failed: ${e}`);
+        }
+        this.raise();
+        ct.grab_key_focus();
+        ct.set_cursor_position(pos);
+        ct.set_selection_bound(pos);
     }
 
     _onViewClick(gesture) {
