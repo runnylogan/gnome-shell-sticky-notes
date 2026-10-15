@@ -15,4 +15,4 @@ Development happens in cloud sessions that can't reach the owner's memory store 
   - **Open:** anything unfinished, untested or needing a decision
   - **Test:** what to check on a real desktop
 - Work not tied to an issue: put the same sections in the final commit message body instead.
-- Handoff comments are temporary: they are deleted after syncing. Don't put anything in them that must stay on the issue; a permanent "what was implemented" comment, if wanted, is a separate comment without the marker.
+- Keep the handoff separate from any permanent "what was implemented" comment (which has no marker); handoff comments may be cleaned up after syncing.
