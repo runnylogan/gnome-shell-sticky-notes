@@ -1117,7 +1117,7 @@ class StickyNotesIndicator extends PanelMenu.Button {
         this.remove_action(this._clickGesture);
 
         this._icon = new St.Icon({
-            icon_name: 'document-edit-symbolic',
+            gicon: Gio.icon_new_for_string(`${ext.path}/icons/sticky-notes-symbolic.svg`),
             style_class: 'system-status-icon',
         });
         this.add_child(this._icon);
