@@ -18,7 +18,7 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-import {liveSpans, render, toggleTask} from './markdown.js';
+import {fromLiveBullets, liveSpans, render, toLiveBullets, toggleTask} from './markdown.js';
 
 const COLOURS = ['yellow', 'green', 'blue', 'pink', 'purple', 'grey'];
 const MIN_W = 160;
@@ -244,7 +244,10 @@ class Note {
         ct.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR);
         ct.set_text(data.text ?? '');
         ct.connect('text-changed', () => {
-            this.data.text = ct.get_text();
+            if (this._swappingBullets)
+                return;
+            // Live bullets (•) are only for show: always save plain '-'.
+            this.data.text = fromLiveBullets(ct.get_text());
             this._syncHint();
             this._syncLiveStyle(true);
             this._syncTextHeight();
@@ -252,6 +255,8 @@ class Note {
             this._manager.scheduleSave();
         });
         ct.connect('cursor-changed', () => {
+            if (this._swappingBullets)
+                return;
             this.restartBlink();
             if (this._syncLiveStyle())
                 this._syncTextHeight();
@@ -413,6 +418,60 @@ class Note {
         this._syncLiveStyle(true);
     }
 
+    // Live bullets: list markers on lines other than the cursor's are shown
+    // as • / ◦ while Live Markdown is on, and as '-' otherwise. The text is
+    // never changed from inside ClutterText's own signals (that breaks an
+    // insert in progress, e.g. Enter), so the swap waits for an idle moment.
+    _queueBullets() {
+        if (this._bulletsId)
+            return;
+        this._bulletsId = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            this._bulletsId = 0;
+            const ct = this._entry.clutter_text;
+            const text = ct.get_text();
+            let target = fromLiveBullets(text);
+            if (this._manager.liveMarkdown && this.isEditing && text.length <= LIVE_MAX_CHARS) {
+                const pos = ct.get_cursor_position();
+                const chars = [...text];
+                const cursorLine = (pos < 0 ? chars : chars.slice(0, pos))
+                    .filter(c => c === '\n').length;
+                target = toLiveBullets(text, cursorLine);
+            }
+            if (this._setBullets(target)) {
+                this._syncLiveStyle(true);
+                this._syncTextHeight();
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    // Swap list markers in the editor's text to match target, which differs
+    // from it only by single-character marker swaps (- and • / ◦), so the
+    // cursor and selection stay where they are. Returns true if it changed.
+    _setBullets(target) {
+        const ct = this._entry.clutter_text;
+        const current = [...ct.get_text()];
+        const wanted = [...target];
+        if (current.length !== wanted.length || current.join('') === target)
+            return false;
+        const cursor = ct.get_cursor_position();
+        const bound = ct.get_selection_bound();
+        this._swappingBullets = true;
+        try {
+            current.forEach((c, i) => {
+                if (c !== wanted[i]) {
+                    ct.delete_text(i, i + 1);
+                    ct.insert_text(wanted[i], i);
+                }
+            });
+            ct.set_cursor_position(cursor);
+            ct.set_selection_bound(bound);
+        } finally {
+            this._swappingBullets = false;
+        }
+        return true;
+    }
+
     // ---- Live Markdown: while editing, style the source in place (lines
     // other than the cursor's look rendered, with the syntax tucked away).
     // Returns true if the styling changed.
@@ -420,6 +479,7 @@ class Note {
         const ct = this._entry.clutter_text;
         if (!this._manager.liveMarkdown || !this.isEditing ||
             ct.get_text().length > LIVE_MAX_CHARS) {
+            this._queueBullets();
             if (!this._liveKey)
                 return false;
             this._liveKey = null;
@@ -434,11 +494,12 @@ class Note {
             }
             return true;
         }
-        const text = ct.get_text();
         const pos = ct.get_cursor_position();
-        const chars = [...text];
+        const chars = [...ct.get_text()];
         const before = pos < 0 ? chars : chars.slice(0, pos);
         const cursorLine = before.filter(c => c === '\n').length;
+        this._queueBullets();
+        const text = ct.get_text();
         const key = `${cursorLine}\n${text}`;
         if (!force && key === this._liveKey)
             return false;
@@ -956,6 +1017,10 @@ class Note {
     destroy() {
         this._endDrag();
         this._stopBlink();
+        if (this._bulletsId) {
+            GLib.source_remove(this._bulletsId);
+            this._bulletsId = 0;
+        }
         this._cancelZoomLater();
         this._animGen = (this._animGen ?? 0) + 1;
         if (this._confirmId) {

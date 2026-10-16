@@ -201,8 +201,10 @@ export function liveSpans(src, rawLines = new Set()) {
             if (m[2] !== ' ')
                 add(body, line.length, 'done');
             liveInline(line, body, line.length, add);
-        } else if ((m = line.match(BULLET))) {
-            add(m[1].length, m[1].length + 1, 'muted');
+        } else if ((m = line.match(LIVE_LIST))) {
+            // A '-' still being typed is muted; a live bullet (•, ◦) is shown as is.
+            if (!LIVE_MARKERS.includes(line[m[1].length]))
+                add(m[1].length, m[1].length + 1, 'muted');
             liveInline(line, line.length - m[2].length, line.length, add);
         } else if ((m = line.match(ORDERED))) {
             add(m[1].length, line.length - m[3].length, 'muted');
@@ -218,4 +220,46 @@ export function liveSpans(src, rawLines = new Set()) {
         offset += line.length + 1;
     }
     return spans;
+}
+
+// ---- live bullets
+// With Live Markdown on, a '- ' list marker on any line but the cursor's is
+// swapped in the editor's text for a real bullet (•, or ◦ when indented,
+// as in the rendered view). The swap is one character for one, so cursor
+// positions don't move, and it is always undone for saving, for the
+// cursor's line and when editing ends, so notes stay standard Markdown.
+
+const LIVE_MARKERS = ['•', '◦'];
+const LIVE_LIST = /^(\s*)[-*+•◦]\s+(.*)$/;
+const DASH_ITEM = /^(\s*)- (?!\[[ xX]\](\s|$))/;
+const LIVE_ITEM = /^(\s*)[•◦] /;
+
+// Apply fn to each line outside fenced code blocks.
+function mapOutsideCode(src, fn) {
+    let inCode = false;
+    return src.split('\n').map((line, i) => {
+        if (FENCE.test(line)) {
+            inCode = !inCode;
+            return line;
+        }
+        return inCode ? line : fn(line, i);
+    }).join('\n');
+}
+
+// Real bullets for '- ' items on every line except keepLine (kept as '-').
+export function toLiveBullets(src, keepLine = -1) {
+    return mapOutsideCode(src, (line, i) => {
+        if (i === keepLine)
+            return line.replace(LIVE_ITEM, '$1- ');
+        const m = line.match(DASH_ITEM);
+        if (!m || RULE.test(line))
+            return line;
+        const indent = m[1].replace(/\t/g, '    ');
+        return `${m[1]}${indent.length >= 2 ? '◦' : '•'}${line.slice(m[1].length + 1)}`;
+    });
+}
+
+// Back to plain '- ' list markers.
+export function fromLiveBullets(src) {
+    return mapOutsideCode(src, line => line.replace(LIVE_ITEM, '$1- '));
 }
