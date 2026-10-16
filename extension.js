@@ -1120,6 +1120,20 @@ export default class StickyNotesExtension extends Extension {
         });
         this._connect(Main.overview, 'showing', () => this._syncLayer());
         this._connect(Main.overview, 'hidden', () => this._syncLayer());
+        // Workspaces added while the Overview is open get their own preview.
+        this._connect(global.workspace_manager, 'notify::n-workspaces', () => this._syncLayerLater());
+
+        // In the Overview the notes layer is hidden, and each workspace
+        // preview shows a live, scaled copy of it instead. This uses the
+        // Overview's WorkspaceBackground (the same in GNOME 50 and 51); it's
+        // loaded lazily so a change to it can only disable the previews.
+        this._previews = new Map();
+        import('resource:///org/gnome/shell/ui/workspace.js').then(module => {
+            if (!this._layer)
+                return;
+            this._WorkspaceBackground = module.WorkspaceBackground;
+            this._syncLayer();
+        }).catch(e => console.warn(`[sticky-notes] No notes in the Overview: ${e}`));
         this._connect(Main.layoutManager, 'monitors-changed', () => {
             for (const note of this._notes.values())
                 note.clampToScreen();
@@ -1152,6 +1166,14 @@ export default class StickyNotesExtension extends Extension {
         }
         this._notes.clear();
         this._notes = null;
+
+        if (this._syncLaterId) {
+            GLib.source_remove(this._syncLaterId);
+            this._syncLaterId = 0;
+        }
+        this._clearPreviews();
+        this._previews = null;
+        this._WorkspaceBackground = null;
 
         Main.layoutManager.removeChrome(this._layer);
         this._layer.destroy();
@@ -1724,6 +1746,73 @@ export default class StickyNotesExtension extends Extension {
 
     _syncLayer() {
         this._layer.visible = this._state.visible && !Main.overview.visible;
+        if (this._state.visible && Main.overview.visible)
+            this._addPreviews();
+        else
+            this._clearPreviews();
+    }
+
+    _syncLayerLater() {
+        if (this._syncLaterId)
+            return;
+        this._syncLaterId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._syncLaterId = 0;
+            this._syncLayer();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    // Put a copy of the notes into every workspace preview that lacks one.
+    _addPreviews() {
+        const WorkspaceBackground = this._WorkspaceBackground;
+        if (!WorkspaceBackground)
+            return;
+        const backgrounds = [];
+        const find = actor => {
+            if (actor instanceof WorkspaceBackground)
+                backgrounds.push(actor);
+            else
+                actor.get_children().forEach(find);
+        };
+        find(Main.layoutManager.overviewGroup);
+
+        for (const bg of backgrounds) {
+            const monitor = Main.layoutManager.monitors[bg._monitorIndex];
+            if (this._previews.has(bg) || !monitor || !bg._bin || !bg._backgroundGroup)
+                continue;
+            // The preview's background group stands for the whole monitor
+            // (top bar cropped off above), but is stretched to the preview's
+            // shape. Fit the monitor inside it at one scale, centred, so the
+            // notes keep their shape and all of them stay in view.
+            const holder = new Clutter.Actor({
+                name: 'sticky-notes-preview',
+                x_expand: true,
+                y_expand: true,
+            });
+            const clone = new Clutter.Clone({source: this._layer});
+            holder.add_child(clone);
+            const sync = () => {
+                const box = bg._backgroundGroup.get_allocation_box();
+                const width = box.x2 - box.x1, height = box.y2 - box.y1;
+                if (!(width > 0 && height > 0))
+                    return;   // not laid out yet (e.g. an off-screen workspace)
+                const scale = Math.min(width / monitor.width, height / monitor.height);
+                clone.set_scale(scale, scale);
+                clone.set_position(
+                    box.x1 + (width - monitor.width * scale) / 2 - monitor.x * scale,
+                    box.y1 + (height - monitor.height * scale) / 2 - monitor.y * scale);
+            };
+            bg._backgroundGroup.connectObject('notify::allocation', sync, holder);
+            holder.connect('destroy', () => this._previews?.delete(bg));
+            bg._bin.add_child(holder);
+            sync();
+            this._previews.set(bg, holder);
+        }
+    }
+
+    _clearPreviews() {
+        for (const holder of [...this._previews?.values() ?? []])
+            holder.destroy();
     }
 
     _connect(obj, signal, cb) {
