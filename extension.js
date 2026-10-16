@@ -86,6 +86,21 @@ function textPositionAt(ct, lx, ly) {
     return distance(raw) < distance(fromBytes) ? raw : fromBytes;
 }
 
+// '<Super><Alt>n' -> 'Super+Alt+N', for showing a keybinding in the menu.
+function shortcutLabel(accel) {
+    if (!accel)
+        return '';
+    const names = {Primary: 'Ctrl', Control: 'Ctrl', Ctrl: 'Ctrl', Shift: 'Shift',
+        Alt: 'Alt', Super: 'Super', Meta: 'Meta', Hyper: 'Hyper'};
+    // Same modifier order as the preferences window (GTK's).
+    const order = ['Shift', 'Ctrl', 'Alt', 'Super', 'Hyper', 'Meta'];
+    const mods = [...accel.matchAll(/<(\w+)>/g)].map(m => names[m[1]] ?? m[1])
+        .sort((x, y) => order.indexOf(x) - order.indexOf(y));
+    let key = accel.replace(/<\w+>/g, '');
+    key = key.length === 1 ? key.toUpperCase() : key.charAt(0).toUpperCase() + key.slice(1);
+    return [...mods, key].join('+');
+}
+
 function setActorCursor(actor, ...names) {
     // Per-actor cursors (as St.Entry uses for its text cursor). Names are
     // tried in order; fail quietly if this Clutter lacks them.
@@ -828,7 +843,9 @@ class StickyNotesIndicator extends PanelMenu.Button {
         right.connect('recognize', () => this.menu.toggle());
         this.add_action(right);
 
-        this.menu.addAction('New Note', () => ext.newNote());
+        this._newNote = this._addShortcutItem('New Note', () => ext.newNote());
+        this._toggle = this._addShortcutItem('Show/Hide Notes',
+            () => ext.setVisible(!ext.visible));
         this._undelete = this.menu.addAction('Restore Closed', () => ext.restoreClosed());
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Arrange'));
         this.menu.addAction('Tile', () => ext.arrange('tile'));
@@ -841,9 +858,12 @@ class StickyNotesIndicator extends PanelMenu.Button {
             ext.zoomOnEdit = state;
         });
         this.menu.addMenuItem(this._zoom);
+        this.menu.addAction('Keyboard Shortcuts…', () => ext.openPreferences());
 
         this.menu.connect('open-state-changed', (_m, open) => {
             if (open) {
+                this._newNote.shortcut.text = ext.shortcut('new-note');
+                this._toggle.shortcut.text = ext.shortcut('toggle-notes');
                 this._restore.setSensitive(ext.canRestore);
                 const n = ext.closedCount;
                 this._undelete.label.text = n > 0
@@ -853,6 +873,20 @@ class StickyNotesIndicator extends PanelMenu.Button {
                 this._zoom.setToggleState(ext.zoomOnEdit);
             }
         });
+    }
+
+    // A menu item with its keyboard shortcut shown on the right.
+    _addShortcutItem(label, callback) {
+        const item = this.menu.addAction(label, callback);
+        item.shortcut = new St.Label({
+            style_class: 'sticky-notes-shortcut',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.END,
+            y_align: Clutter.ActorAlign.CENTER,
+            opacity: 150,   // dimmed, in whichever colour the menu text is
+        });
+        item.add_child(item.shortcut);
+        return item;
     }
 
     sync(visible) {
@@ -970,6 +1004,10 @@ export default class StickyNotesExtension extends Extension {
 
     get visible() {
         return this._state.visible;
+    }
+
+    shortcut(key) {
+        return shortcutLabel(this._settings.get_strv(key)[0]);
     }
 
     get zoomOnEdit() {
