@@ -1264,8 +1264,14 @@ export default class StickyNotesExtension extends Extension {
             }
             return Clutter.EVENT_PROPAGATE;
         });
-        this._connect(Main.overview, 'showing', () => this._syncLayer());
-        this._connect(Main.overview, 'hidden', () => this._syncLayer());
+        this._connect(Main.overview, 'showing', () => {
+            this._overviewWorkspace = global.workspace_manager.get_active_workspace();
+            this._syncLayer();
+        });
+        this._connect(Main.overview, 'hidden', () => {
+            this._overviewWorkspace = null;
+            this._syncLayer();
+        });
         // In the Overview the notes layer is hidden; instead every workspace
         // preview and workspace thumbnail carries a live copy of it. GNOME
         // rebuilds those often (each time the Overview opens, and on every
@@ -1313,6 +1319,11 @@ export default class StickyNotesExtension extends Extension {
 
         this._injections.clear();
         this._injections = null;
+        this._overviewWorkspace = null;
+        if (this._syncLaterId) {
+            GLib.source_remove(this._syncLaterId);
+            this._syncLaterId = 0;
+        }
         for (const copy of [...this._previews.values()])
             copy.destroy();
         this._previews = null;
@@ -1955,8 +1966,28 @@ export default class StickyNotesExtension extends Extension {
 
     _syncLayer() {
         this._layer.visible = this._state.visible && !Main.overview.visible;
-        for (const copy of this._previews.values())
-            copy.visible = this._state.visible;
+        for (const [target, copy] of this._previews)
+            copy.visible = this._copyShown(target);
+    }
+
+    // In the Overview, notes are shown on the workspace that was active when
+    // it opened (or the active one, before that's known).
+    _copyShown(target) {
+        if (!this._state.visible)
+            return false;
+        const workspace = target.metaWorkspace ?? target.get_parent()?.metaWorkspace;
+        const shown = this._overviewWorkspace ?? global.workspace_manager.get_active_workspace();
+        return !!workspace && workspace === shown;   // hidden until known
+    }
+
+    _syncLayerLater() {
+        if (this._syncLaterId)
+            return;
+        this._syncLaterId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._syncLaterId = 0;
+            this._syncLayer();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     // Give every instance of an Overview class a copy of the notes: those
@@ -1989,9 +2020,12 @@ export default class StickyNotesExtension extends Extension {
             const copy = addCopy(target);
             if (!copy)
                 return;
-            copy.visible = this._state.visible;
             copy.connect('destroy', () => this._previews?.delete(target));
             this._previews.set(target, copy);
+            // A workspace preview is added to its workspace before that's
+            // told which workspace it is, so decide once building is done.
+            copy.visible = this._copyShown(target);
+            this._syncLayerLater();
         } catch (e) {
             console.warn(`[sticky-notes] Couldn't show notes in the Overview: ${e}`);
         }
@@ -2005,10 +2039,17 @@ export default class StickyNotesExtension extends Extension {
         const monitor = Main.layoutManager.monitors[bg._monitorIndex];
         if (!monitor || !bg._bin || !bg._backgroundGroup)
             return null;
+        // The copy must not ask for any size of its own: the preview would
+        // grow to fit the notes layer (making the app grid's workspace
+        // previews one long strip). It's placed by sync() and clipped.
         const holder = new Clutter.Actor({
             name: 'sticky-notes-preview',
             x_expand: true,
             y_expand: true,
+            min_width: 0,
+            natural_width: 0,
+            min_height: 0,
+            natural_height: 0,
         });
         const clone = new Clutter.Clone({source: this._layer});
         holder.add_child(clone);
@@ -2036,7 +2077,14 @@ export default class StickyNotesExtension extends Extension {
         const contents = thumbnail._contents;
         if (!contents || !thumbnail._viewport)
             return null;
-        const clone = new Clutter.Clone({source: this._layer, name: 'sticky-notes-preview'});
+        const clone = new Clutter.Clone({
+            source: this._layer,
+            name: 'sticky-notes-preview',
+            min_width: 0,
+            natural_width: 0,
+            min_height: 0,
+            natural_height: 0,
+        });
         const sync = () => clone.set_position(contents.x, contents.y);
         contents.connectObject('notify::x', sync, 'notify::y', sync, clone);
         thumbnail._viewport.add_child(clone);

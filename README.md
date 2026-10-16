@@ -15,7 +15,7 @@ Lightweight sticky notes that sit on your desktop, above windows and below the t
 - **Placement** — new notes rotate colour automatically and are placed in free space so they don't overlap existing notes.
 - **Markdown** — notes render Markdown when not being edited; click to edit, click away or press `Esc` to render. Supports headings, **bold**, *italic*, ~~strikethrough~~, `inline code`, fenced code blocks, bullet and numbered lists, quotes, horizontal rules, links (shown underlined) and task lists — `- [ ]` / `- [x]` checkboxes can be ticked directly in the rendered view.
 - **Shortcuts** — `Super`+`Alt`+`N` new note, `Super`+`Alt`+`H` show/hide notes. Both are shown in the menu and can be changed from **Preferences…** (or the Extensions app).
-- In the Overview, notes appear (scaled, not clickable) in each workspace preview and workspace thumbnail while they're shown; they're hidden over fullscreen windows.
+- In the Overview, notes appear (scaled, not clickable) on the workspace you opened it from, in its preview and its thumbnail, while they're shown; they're hidden over fullscreen windows.
 
 Notes are stored locally as JSON in `~/.local/share/sticky-notes/notes.json`. Nothing leaves your machine.
 
