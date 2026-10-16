@@ -263,6 +263,14 @@ class Note {
                 this._manager.releaseFocus();
                 return Clutter.EVENT_STOP;
             }
+            // GNOME 51's ClutterText no longer inserts a newline for Enter
+            // (it now skips control characters), so insert it here on both.
+            if (symbol === Clutter.KEY_Return || symbol === Clutter.KEY_KP_Enter ||
+                symbol === Clutter.KEY_ISO_Enter) {
+                ct.delete_selection();
+                ct.insert_unichar('\n');
+                return Clutter.EVENT_STOP;
+            }
             return Clutter.EVENT_PROPAGATE;
         });
         ct.add_action(keys);
