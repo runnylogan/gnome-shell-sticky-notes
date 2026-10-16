@@ -13,5 +13,9 @@
       <default>false</default>
       <summary>Enlarge and centre a note while it is being edited</summary>
     </key>
+    <key name="live-markdown" type="b">
+      <default>false</default>
+      <summary>Style Markdown in place while editing, except on the cursor's line</summary>
+    </key>
   </schema>
 </schemalist>

@@ -10,7 +10,7 @@ Lightweight sticky notes that sit on your desktop, above windows and below the t
   - New Note, Show/Hide Notes (each with its keyboard shortcut)
   - Restore Closed (last 10 closed notes are kept)
   - Arrange: **Tile**, **Cascade**, **Gather** (groups notes around the centre of the screen at their current size, cascading any that don't fit; every note stays clickable), **Restore Layout**
-  - Options: **Focus On Edit** — enlarge and centre a note while you edit it (off by default); **Keyboard Shortcuts…** — change the shortcuts
+  - Options: **Focus On Edit** — enlarge and centre a note while you edit it (off by default); **Live Markdown** — while editing, show every line except the one you're on with its Markdown styled in place (off by default); **Keyboard Shortcuts…** — change the shortcuts
 - **Notes** — drag by the top bar, resize from the bottom-right corner, cycle through six colours, **+** to add a note beside the current one, **×** to close (second click within 3 s confirms if the note has text).
 - **Placement** — new notes rotate colour automatically and are placed in free space so they don't overlap existing notes.
 - **Markdown** — notes render Markdown when not being edited; click to edit, click away or press `Esc` to render. Supports headings, **bold**, *italic*, ~~strikethrough~~, `inline code`, fenced code blocks, bullet and numbered lists, quotes, horizontal rules, links (shown underlined) and task lists — `- [ ]` / `- [x]` checkboxes can be ticked directly in the rendered view.

@@ -18,7 +18,7 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-import {render, toggleTask} from './markdown.js';
+import {liveSpans, render, toggleTask} from './markdown.js';
 
 const COLOURS = ['yellow', 'green', 'blue', 'pink', 'purple', 'grey'];
 const MIN_W = 160;
@@ -100,6 +100,35 @@ function shortcutLabel(accel) {
     key = key.length === 1 ? key.toUpperCase() : key.charAt(0).toUpperCase() + key.slice(1);
     return [...mods, key].join('+');
 }
+
+// Byte offset of every UTF-16 index in text (Pango attributes use bytes).
+function byteOffsets(text) {
+    const offsets = new Array(text.length + 1);
+    let bytes = 0;
+    for (let i = 0; i < text.length; i++) {
+        offsets[i] = bytes;
+        const c = text.charCodeAt(i);
+        if (c >= 0xd800 && c < 0xdc00 && i + 1 < text.length) {
+            offsets[++i] = bytes;   // surrogate pair: one 4-byte character
+            bytes += 4;
+        } else {
+            bytes += c < 0x80 ? 1 : c < 0x800 ? 2 : 3;
+        }
+    }
+    offsets[text.length] = bytes;
+    return offsets;
+}
+
+// Mix two Cogl/Clutter colours; t = 0 gives a, 1 gives b. 16-bit channels.
+function mixColour(a, b, t) {
+    return ['red', 'green', 'blue'].map(c => Math.round((a[c] + (b[c] - a[c]) * t) * 257));
+}
+
+// Restyling costs grow with the note; past this, long notes edit as plain
+// source so typing stays responsive.
+const LIVE_MAX_CHARS = 5000;
+const LIVE_HEADING_SCALE = [1.44, 1.2, 1, 1, 1, 1];   // as x-large, large, medium
+const LIVE_LINK = [0x1a, 0x5f, 0xb4].map(c => c * 257);
 
 function setActorCursor(actor, ...names) {
     // Per-actor cursors (as St.Entry uses for its text cursor). Names are
@@ -217,11 +246,16 @@ class Note {
         ct.connect('text-changed', () => {
             this.data.text = ct.get_text();
             this._syncHint();
+            this._syncLiveStyle(true);
             this._syncTextHeight();
             this.restartBlink();
             this._manager.scheduleSave();
         });
-        ct.connect('cursor-changed', () => this.restartBlink());
+        ct.connect('cursor-changed', () => {
+            this.restartBlink();
+            if (this._syncLiveStyle())
+                this._syncTextHeight();
+        });
         const keys = new Clutter.KeyController();
         keys.connect('key-press', () => {
             const [, symbol] = keys.get_key();
@@ -325,6 +359,9 @@ class Note {
         const vadj = this._scroll.vadjustment;
         vadj.connect('notify::page-size', () => this._syncTextHeight());
         this._entry.connect('style-changed', () => this._syncTextHeight());
+        // St resets the text's attributes on every style change (focus,
+        // hover, zoom), so put the live styling back after it has.
+        this._entry.connect_after('style-changed', () => this._syncLiveStyle(true));
         ct.connect('notify::width', () => this._syncTextHeight());
 
         // Keep the cursor in view while typing or moving through a long note.
@@ -365,6 +402,106 @@ class Note {
         this._view.hide();
         this._editor.show();
         this._syncHint();
+        this._syncLiveStyle(true);
+    }
+
+    // ---- Live Markdown: while editing, style the source in place (lines
+    // other than the cursor's look rendered, with the syntax tucked away).
+    // Returns true if the styling changed.
+    _syncLiveStyle(force = false) {
+        const ct = this._entry.clutter_text;
+        if (!this._manager.liveMarkdown || !this.isEditing ||
+            ct.get_text().length > LIVE_MAX_CHARS) {
+            if (!this._liveKey)
+                return false;
+            this._liveKey = null;
+            // Back to plain text in the theme's colour, as St had it.
+            try {
+                const fg = this._entry.get_theme_node().get_foreground_color();
+                const list = new Pango.AttrList();
+                list.insert(Pango.attr_foreground_new(...mixColour(fg, fg, 0)));
+                ct.set_attributes(list);
+            } catch (_e) {
+                ct.set_attributes(null);
+            }
+            return true;
+        }
+        const text = ct.get_text();
+        const pos = ct.get_cursor_position();
+        const chars = [...text];
+        const before = pos < 0 ? chars : chars.slice(0, pos);
+        const cursorLine = before.filter(c => c === '\n').length;
+        const key = `${cursorLine}\n${text}`;
+        if (!force && key === this._liveKey)
+            return false;
+        this._liveKey = key;
+
+        let fg, bg;
+        try {
+            fg = this._entry.get_theme_node().get_foreground_color();
+            bg = this.actor.get_theme_node().get_background_color();
+        } catch (_e) {
+            return false;
+        }
+        const bytes = byteOffsets(text);
+        const list = new Pango.AttrList();
+        const add = (attr, start, end) => {
+            attr.start_index = bytes[start];
+            attr.end_index = bytes[end];
+            list.insert(attr);
+        };
+        const colour = (rgb, start, end) => add(Pango.attr_foreground_new(...rgb), start, end);
+        // Replacing the attributes drops St's text colour, so restate it.
+        colour(mixColour(fg, fg, 0), 0, text.length);
+        const muted = mixColour(fg, bg, 0.55);
+        for (const {start, end, style} of liveSpans(text, new Set([cursorLine]))) {
+            switch (style) {
+            case 'hide':
+                // Shrink to almost nothing, in the note's own colour.
+                add(Pango.attr_scale_new(0.05), start, end);
+                colour(mixColour(bg, bg, 0), start, end);
+                break;
+            case 'muted':
+                colour(muted, start, end);
+                break;
+            case 'bold':
+                add(Pango.attr_weight_new(Pango.Weight.BOLD), start, end);
+                break;
+            case 'italic':
+                add(Pango.attr_style_new(Pango.Style.ITALIC), start, end);
+                break;
+            case 'strike':
+                add(Pango.attr_strikethrough_new(true), start, end);
+                break;
+            case 'code':
+                add(Pango.attr_family_new('monospace'), start, end);
+                add(Pango.attr_background_new(...mixColour(bg, {red: 0, green: 0, blue: 0}, 0.08)), start, end);
+                break;
+            case 'link':
+                colour(LIVE_LINK, start, end);
+                add(Pango.attr_underline_new(Pango.Underline.SINGLE), start, end);
+                break;
+            case 'box':
+                add(Pango.attr_weight_new(Pango.Weight.BOLD), start, end);
+                colour(LIVE_LINK, start, end);
+                break;
+            case 'done':
+                add(Pango.attr_strikethrough_new(true), start, end);
+                colour(muted, start, end);
+                break;
+            case 'quote':
+                add(Pango.attr_style_new(Pango.Style.ITALIC), start, end);
+                colour(muted, start, end);
+                break;
+            default: {
+                const level = Number(style.slice(1));
+                add(Pango.attr_weight_new(Pango.Weight.BOLD), start, end);
+                add(Pango.attr_scale_new(LIVE_HEADING_SCALE[level - 1]), start, end);
+            }
+            }
+        }
+        ct.set_attributes(list);
+        return true;
     }
 
     _syncHint() {
@@ -599,6 +736,7 @@ class Note {
         }
         this._editor.hide();
         this._view.show();
+        this._syncLiveStyle();
     }
 
     // Text position nearest a stage point (-1, the end, if it can't be mapped).
@@ -858,6 +996,11 @@ class StickyNotesIndicator extends PanelMenu.Button {
             ext.zoomOnEdit = state;
         });
         this.menu.addMenuItem(this._zoom);
+        this._live = new PopupMenu.PopupSwitchMenuItem('Live Markdown', false);
+        this._live.connect('toggled', (_item, state) => {
+            ext.liveMarkdown = state;
+        });
+        this.menu.addMenuItem(this._live);
         this.menu.addAction('Keyboard Shortcuts…', () => ext.openPreferences());
 
         this.menu.connect('open-state-changed', (_m, open) => {
@@ -871,6 +1014,7 @@ class StickyNotesIndicator extends PanelMenu.Button {
                     : 'Restore Closed';
                 this._undelete.setSensitive(n > 0);
                 this._zoom.setToggleState(ext.zoomOnEdit);
+                this._live.setToggleState(ext.liveMarkdown);
             }
         });
     }
@@ -936,6 +1080,12 @@ export default class StickyNotesExtension extends Extension {
         // Notes that lose focus go back to rendered Markdown.
         this._connect(global.stage, 'notify::key-focus', () => this._onKeyFocusChanged());
         this._connect(this._settings, 'changed::zoom-on-edit', () => this._onZoomSettingChanged());
+        this._connect(this._settings, 'changed::live-markdown', () => {
+            for (const note of this._notes.values()) {
+                note._syncLiveStyle(true);
+                note._syncTextHeight();
+            }
+        });
         // Clicking into any window hands the keyboard back to it.
         this._connect(global.display, 'notify::focus-window', () => {
             if (global.display.focus_window && this._focusedNote())
@@ -1008,6 +1158,14 @@ export default class StickyNotesExtension extends Extension {
 
     shortcut(key) {
         return shortcutLabel(this._settings.get_strv(key)[0]);
+    }
+
+    get liveMarkdown() {
+        return this._settings?.get_boolean('live-markdown') ?? false;
+    }
+
+    set liveMarkdown(value) {
+        this._settings.set_boolean('live-markdown', value);
     }
 
     get zoomOnEdit() {

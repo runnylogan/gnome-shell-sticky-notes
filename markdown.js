@@ -116,3 +116,106 @@ export function toggleTask(src, lineIndex) {
         (_m, a, state, b) => `${a}${state === ' ' ? 'x' : ' '}${b}`);
     return lines.join('\n');
 }
+
+// ---- live styling while editing
+// The editor can't show rendered markup (its text has to stay the source),
+// so instead the source is styled in place. liveSpans() returns
+// {start, end, style} ranges as string indices into src; styles are 'hide'
+// (syntax to tuck away), 'muted' (syntax left visible), 'h1'…'h6', 'bold',
+// 'italic', 'strike', 'code', 'link', 'box', 'done' and 'quote'. Lines in
+// rawLines (e.g. the cursor's) are left unstyled so they edit as plain text.
+
+function liveInline(line, from, to, add) {
+    const taken = [];
+    const free = (s, e) => !taken.some(([a, b]) => s < b && a < e);
+    const each = (re, fn) => {
+        const seg = line.slice(from, to);
+        for (const m of seg.matchAll(re)) {
+            fn(m, from + m.index, from + m.index + m[0].length);
+        }
+    };
+    // Same patterns as inline(), in the same order.
+    each(/`([^`\n]+)`/g, (m, s, e) => {
+        taken.push([s, e]);
+        add(s, s + 1, 'hide');
+        add(s + 1, e - 1, 'code');
+        add(e - 1, e, 'hide');
+    });
+    each(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, s, e) => {
+        if (!free(s, e))
+            return;
+        add(s, s + 1, 'hide');
+        add(s + 1, s + 1 + m[1].length, 'link');
+        add(s + 1 + m[1].length, e, 'hide');
+    });
+    const pair = (re, marker, style, lead) => each(re, (m, s, e) => {
+        const start = s + (lead ? m[1].length : 0);
+        if (!free(start, e))
+            return;
+        add(start, start + marker, 'hide');
+        add(start + marker, e - marker, style);
+        add(e - marker, e, 'hide');
+    });
+    pair(/\*\*(?!\s)(.+?)(?<!\s)\*\*/g, 2, 'bold', false);
+    pair(/(^|[^\w])__(?!\s)(.+?)(?<!\s)__(?!\w)/g, 2, 'bold', true);
+    pair(/(^|[^*\w])\*(?![\s*])([^*\n]+?)(?<!\s)\*(?!\*)/g, 1, 'italic', true);
+    pair(/(^|[^\w])_(?![\s_])([^_\n]+?)(?<!\s)_(?!\w)/g, 1, 'italic', true);
+    pair(/~~(?!\s)(.+?)(?<!\s)~~/g, 2, 'strike', false);
+}
+
+export function liveSpans(src, rawLines = new Set()) {
+    const spans = [];
+    let offset = 0;
+    let inCode = false;
+    for (const [i, line] of src.split('\n').entries()) {
+        const add = (s, e, style) => {
+            if (e > s)
+                spans.push({start: offset + s, end: offset + e, style});
+        };
+        const raw = rawLines.has(i);
+        let m;
+        if (FENCE.test(line)) {
+            inCode = !inCode;
+            if (!raw)
+                add(0, line.length, 'muted');
+        } else if (inCode) {
+            add(0, line.length, 'code');
+        } else if (raw) {
+            // left as typed
+        } else if ((m = line.match(HEADING))) {
+            const level = m[1].length;
+            const start = line.indexOf(m[2], level);
+            add(0, start > 0 ? start : line.length, 'hide');
+            if (m[2]) {
+                add(start, start + m[2].length, `h${level}`);
+                liveInline(line, start, start + m[2].length, add);
+                add(start + m[2].length, line.length, 'hide');
+            }
+        } else if (RULE.test(line)) {
+            add(0, line.length, 'muted');
+        } else if ((m = line.match(TASK))) {
+            const box = m[1].length + 2;
+            add(m[1].length, box, 'hide');
+            add(box, box + 3, 'box');
+            const body = line.length - m[4].length;
+            if (m[2] !== ' ')
+                add(body, line.length, 'done');
+            liveInline(line, body, line.length, add);
+        } else if ((m = line.match(BULLET))) {
+            add(m[1].length, m[1].length + 1, 'muted');
+            liveInline(line, line.length - m[2].length, line.length, add);
+        } else if ((m = line.match(ORDERED))) {
+            add(m[1].length, line.length - m[3].length, 'muted');
+            liveInline(line, line.length - m[3].length, line.length, add);
+        } else if ((m = line.match(QUOTE))) {
+            const body = line.length - m[1].length;
+            add(0, body, 'muted');
+            add(body, line.length, 'quote');
+            liveInline(line, body, line.length, add);
+        } else {
+            liveInline(line, 0, line.length, add);
+        }
+        offset += line.length + 1;
+    }
+    return spans;
+}
