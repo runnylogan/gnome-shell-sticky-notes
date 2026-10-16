@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 runnylogan
-// Preferences: view and change the keyboard shortcuts.
+// Preferences: keyboard shortcuts and snapping options.
 
 import Adw from 'gi://Adw';
 import Gdk from 'gi://Gdk';
+import Gio from 'gi://Gio';
 import GObject from 'gi://GObject';
 import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
+
+const SNAP_OPTIONS = [
+    ['snap-screen-edges', 'Snap to screen edges', 'Line notes up with the edges of the screen too'],
+    ['snap-resize', 'Snap when resizing', 'Snap a note’s size to nearby notes when resizing it'],
+    ['snap-guides', 'Show guide lines', 'Show where a note will snap while it’s being dragged'],
+];
 
 const SHORTCUTS = [
     ['new-note', 'New note'],
@@ -102,6 +109,17 @@ export default class StickyNotesPreferences extends ExtensionPreferences {
         for (const [key, title] of SHORTCUTS)
             group.add(new ShortcutRow(settings, key, title));
         page.add(group);
+
+        const snapping = new Adw.PreferencesGroup({
+            title: 'Snapping',
+            description: 'Used when Snap Notes is switched on in the menu.',
+        });
+        for (const [key, title, subtitle] of SNAP_OPTIONS) {
+            const row = new Adw.SwitchRow({title, subtitle});
+            settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
+            snapping.add(row);
+        }
+        page.add(snapping);
         window.add(page);
     }
 }

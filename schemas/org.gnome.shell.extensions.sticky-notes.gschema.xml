@@ -13,6 +13,22 @@
       <default>false</default>
       <summary>Enlarge and centre a note while it is being edited</summary>
     </key>
+    <key name="snap-notes" type="b">
+      <default>false</default>
+      <summary>Snap a moved or resized note to nearby notes when it's let go</summary>
+    </key>
+    <key name="snap-screen-edges" type="b">
+      <default>true</default>
+      <summary>Also snap to the edges of the screen</summary>
+    </key>
+    <key name="snap-resize" type="b">
+      <default>true</default>
+      <summary>Also snap a note's size when resizing it</summary>
+    </key>
+    <key name="snap-guides" type="b">
+      <default>true</default>
+      <summary>Show guide lines while dragging when a note will snap</summary>
+    </key>
     <key name="live-markdown" type="b">
       <default>false</default>
       <summary>Style Markdown in place while editing, except on the cursor's line</summary>

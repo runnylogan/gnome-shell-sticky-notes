@@ -95,3 +95,7 @@
   padding-left: 24px;
   font-size: 0.9em;
 }
+
+.sticky-notes-guide {
+  background-color: -st-accent-color;
+}

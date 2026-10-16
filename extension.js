@@ -130,6 +130,78 @@ const LIVE_MAX_CHARS = 5000;
 const LIVE_HEADING_SCALE = [1.44, 1.2, 1, 1, 1, 1];   // as x-large, large, medium
 const LIVE_LINK = [0x1a, 0x5f, 0xb4].map(c => c * 257);
 
+// ---- snapping
+
+const SNAP_DISTANCE = 16;   // how close an edge must be to snap to a target
+const SNAP_NEAR = 64;       // notes this close on the other axis are targets
+
+// Snap a note's rect r (moved, or resized from its bottom-right corner) to
+// other notes and, if edges, the work area's edges. Each axis snaps on its
+// own to the nearest target within SNAP_DISTANCE: alongside another note
+// (GAP apart), or lined up with one of its edges. Returns the snapped rect
+// and the guide lines to show for it.
+function snapRect(r, others, area, {resize = false, edges = true} = {}) {
+    const out = {...r};
+    const guides = [];
+    const axes = [
+        {pos: 'x', size: 'w', cross: 'y', crossSize: 'h'},
+        {pos: 'y', size: 'h', cross: 'x', crossSize: 'w'},
+    ];
+    for (const {pos, size, cross, crossSize} of axes) {
+        const min = size === 'w' ? MIN_W : MIN_H;
+        // The edge being placed: the start when moving, the end when resizing.
+        const edge = resize ? r[pos] + r[size] : r[pos];
+        const targets = [];   // {edge, line, from} — line is where to draw the guide
+        for (const o of others) {
+            const gap = Math.max(o[cross] - (r[cross] + r[crossSize]), r[cross] - (o[cross] + o[crossSize]));
+            if (gap > SNAP_NEAR)
+                continue;
+            const start = o[pos], end = o[pos] + o[size];
+            if (resize) {
+                targets.push({edge: end, line: end, from: o});
+                targets.push({edge: start - GAP, line: start - GAP / 2, from: o});
+            } else {
+                targets.push({edge: start, line: start, from: o});
+                targets.push({edge: end - r[size], line: end, from: o});
+                targets.push({edge: end + GAP, line: end + GAP / 2, from: o});
+                targets.push({edge: start - GAP - r[size], line: start - GAP / 2, from: o});
+            }
+        }
+        if (edges) {
+            const start = area[pos], end = area[pos] + area[size];
+            targets.push({edge: resize ? end : end - r[size], line: end, from: null});
+            if (!resize)
+                targets.push({edge: start, line: start, from: null});
+        }
+        let best = null;
+        for (const t of targets) {
+            const d = Math.abs(t.edge - edge);
+            if (d <= SNAP_DISTANCE && (!best || d < Math.abs(best.edge - edge)))
+                best = t;
+        }
+        if (!best)
+            continue;
+        if (resize)
+            out[size] = Math.max(min, Math.round(best.edge - r[pos]));
+        else
+            out[pos] = Math.round(best.edge);
+        best.axis = {pos, size, cross, crossSize};
+        guides.push(best);
+    }
+    // Draw each guide along the other axis, spanning both notes (or the
+    // whole work area for a screen edge), using the snapped rect.
+    const lines = guides.map(({line, from, axis: {pos, cross, crossSize}}) => {
+        const a = from ? Math.min(out[cross], from[cross]) : area[cross];
+        const b = from
+            ? Math.max(out[cross] + out[crossSize], from[cross] + from[crossSize])
+            : area[cross] + area[crossSize];
+        return pos === 'x'
+            ? {x: Math.round(line), y: a, w: 0, h: b - a}
+            : {x: a, y: Math.round(line), w: b - a, h: 0};
+    });
+    return {rect: out, lines};
+}
+
 function setActorCursor(actor, ...names) {
     // Per-actor cursors (as St.Entry uses for its text cursor). Names are
     // tried in order; fail quietly if this Clutter lacks them.
@@ -221,7 +293,7 @@ class Note {
         setActorCursor(dragArea, 'MOVE', 'GRAB', 'FLEUR');
         this._makeDraggable(dragArea, (dx, dy, s) => {
             this.actor.set_position(s.x + dx, s.y + dy);
-        });
+        }, false);
 
         this._deleteBtn = this._button('window-close-symbolic', 'Delete note');
         this._deleteBtn.connect('clicked', () => this._onDelete());
@@ -392,7 +464,7 @@ class Note {
         setActorCursor(grip, 'SE_RESIZE', 'BOTTOM_RIGHT_CORNER');
         this._makeDraggable(grip, (dx, dy, s) => {
             this.actor.set_size(Math.max(MIN_W, s.w + dx), Math.max(MIN_H, s.h + dy));
-        });
+        }, true);
         footer.add_child(grip);
 
         this.actor.add_child(header);
@@ -877,7 +949,7 @@ class Note {
         });
     }
 
-    _makeDraggable(handle, onMove) {
+    _makeDraggable(handle, onMove, resize) {
         const pan = new Clutter.PanGesture();
         pan.set_begin_threshold(0);
         this._pans ??= [];
@@ -896,11 +968,13 @@ class Note {
                 return;
             const now = pan.get_centroid_abs();
             onMove(now.x - this._drag.px, now.y - this._drag.py, this._drag);
+            this._manager.previewSnap(this, resize);
         });
         const finish = () => {
             if (!this._drag)
                 return;
             this._endDrag();
+            this._manager.applySnap(this, resize);
             this.clampToScreen();
             this._syncGeometry();
             this._manager.noteMovedByHand();
@@ -1081,7 +1155,12 @@ class StickyNotesIndicator extends PanelMenu.Button {
             ext.liveMarkdown = state;
         });
         this.menu.addMenuItem(this._live);
-        this.menu.addAction('Keyboard Shortcuts…', () => ext.openPreferences());
+        this._snap = new PopupMenu.PopupSwitchMenuItem('Snap Notes', false);
+        this._snap.connect('toggled', (_item, state) => {
+            ext.snapNotes = state;
+        });
+        this.menu.addMenuItem(this._snap);
+        this.menu.addAction('Preferences…', () => ext.openPreferences());
 
         this.menu.connect('open-state-changed', (_m, open) => {
             if (open) {
@@ -1095,6 +1174,7 @@ class StickyNotesIndicator extends PanelMenu.Button {
                 this._undelete.setSensitive(n > 0);
                 this._zoom.setToggleState(ext.zoomOnEdit);
                 this._live.setToggleState(ext.liveMarkdown);
+                this._snap.setToggleState(ext.snapNotes);
             }
         });
     }
@@ -1239,6 +1319,7 @@ export default class StickyNotesExtension extends Extension {
         Main.layoutManager.removeChrome(this._layer);
         this._layer.destroy();
         this._layer = null;
+        this._guides = null;
 
         this._indicator.destroy();
         this._indicator = null;
@@ -1256,6 +1337,71 @@ export default class StickyNotesExtension extends Extension {
 
     shortcut(key) {
         return shortcutLabel(this._settings.get_strv(key)[0]);
+    }
+
+    get snapNotes() {
+        return this._settings?.get_boolean('snap-notes') ?? false;
+    }
+
+    set snapNotes(value) {
+        this._settings.set_boolean('snap-notes', value);
+    }
+
+    // ---- snapping (Snap Notes): guides while a note is dragged or
+    // resized, and the snap itself when it's let go.
+
+    _snapFor(note, resize) {
+        if (!this.snapNotes || (resize && !this._settings.get_boolean('snap-resize')))
+            return null;
+        const [x, y] = note.actor.get_position();
+        const [w, h] = note.actor.get_size();
+        const others = [...this._notes.values()]
+            .filter(n => n !== note && n.actor.visible)
+            .map(n => {
+                const [ox, oy] = n.actor.get_position();
+                const [ow, oh] = n.actor.get_size();
+                return {x: ox, y: oy, w: ow, h: oh};
+            });
+        const index = Main.layoutManager.findIndexForActor(note.actor);
+        const area = Main.layoutManager.getWorkAreaForMonitor(index);
+        return snapRect({x, y, w, h}, others, area,
+            {resize, edges: this._settings.get_boolean('snap-screen-edges')});
+    }
+
+    previewSnap(note, resize) {
+        const snap = this._settings.get_boolean('snap-guides') ? this._snapFor(note, resize) : null;
+        this._showGuides(snap?.lines ?? []);
+    }
+
+    applySnap(note, resize) {
+        this._showGuides([]);
+        const snap = this._snapFor(note, resize);
+        if (!snap)
+            return;
+        const {x, y, w, h} = snap.rect;
+        if (resize)
+            note.actor.set_size(w, h);
+        else
+            note.actor.set_position(x, y);
+    }
+
+    _showGuides(lines) {
+        this._guides ??= [];
+        while (this._guides.length < lines.length) {
+            const guide = new St.Widget({style_class: 'sticky-notes-guide', reactive: false});
+            this._layer.add_child(guide);
+            this._guides.push(guide);
+        }
+        this._guides.forEach((guide, i) => {
+            const line = lines[i];
+            guide.visible = !!line;
+            if (!line)
+                return;
+            // 2 px wide, centred on the line.
+            guide.set_position(line.w ? line.x : line.x - 1, line.h ? line.y : line.y - 1);
+            guide.set_size(line.w || 2, line.h || 2);
+            this._layer.set_child_above_sibling(guide, null);
+        });
     }
 
     get liveMarkdown() {
