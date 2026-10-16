@@ -168,10 +168,11 @@ function snapRect(r, others, area, {resize = false, edges = true} = {}) {
             }
         }
         if (edges) {
+            // Guides for screen edges sit just inside the edge, so they show.
             const start = area[pos], end = area[pos] + area[size];
-            targets.push({edge: resize ? end : end - r[size], line: end, from: null});
+            targets.push({edge: resize ? end : end - r[size], line: end - 1, from: null});
             if (!resize)
-                targets.push({edge: start, line: start, from: null});
+                targets.push({edge: start, line: start + 1, from: null});
         }
         let best = null;
         for (const t of targets) {
@@ -1363,7 +1364,8 @@ export default class StickyNotesExtension extends Extension {
                 return {x: ox, y: oy, w: ow, h: oh};
             });
         const index = Main.layoutManager.findIndexForActor(note.actor);
-        const area = Main.layoutManager.getWorkAreaForMonitor(index);
+        const workArea = Main.layoutManager.getWorkAreaForMonitor(index);
+        const area = {x: workArea.x, y: workArea.y, w: workArea.width, h: workArea.height};
         return snapRect({x, y, w, h}, others, area,
             {resize, edges: this._settings.get_boolean('snap-screen-edges')});
     }
