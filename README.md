@@ -38,7 +38,7 @@ gnome-extensions enable sticky-notes@runnylogan
 ```bash
 git clone https://github.com/runnylogan/gnome-shell-sticky-notes.git
 cd gnome-shell-sticky-notes
-gnome-extensions pack --force --extra-source=markdown.js --extra-source=prefs.js
+gnome-extensions pack --force --extra-source=markdown.js --extra-source=prefs.js --extra-source=icons
 gnome-extensions install --force sticky-notes@runnylogan.shell-extension.zip
 ```
 
