@@ -6,6 +6,7 @@
 
 const LINK = '#1a5fb4';
 const MUTED = '#5e5c64';
+const BOX_SIZE = '150%';   // task checkboxes, relative to the text
 
 export function escape(text) {
     return text
@@ -82,7 +83,8 @@ export function render(src) {
         } else if ((m = line.match(TASK))) {
             const indent = m[1].replace(/\t/g, '    ');
             const done = m[2] !== ' ';
-            const box = done ? '☑' : '☐';
+            // The box glyphs are small at text size, so draw them larger.
+            const box = `<span size="${BOX_SIZE}">${done ? '☑' : '☐'}</span>`;
             tasks.set(out.length, {line: i, column: indent.length});
             const body = inline(m[4]);
             out.push(done
