@@ -1707,22 +1707,17 @@ export default class StickyNotesExtension extends Extension {
     }
 
     // Gather: keep every note's size and pack them, largest first, as close
-    // to the centre as they go without overlapping. Notes that don't fit
-    // are cascaded on top. Whatever happens, every note keeps an uncovered
-    // patch big enough to click, so none is lost under the others.
+    // to the centre as they go without overlapping. When they don't all fit
+    // on screen, notes round the edge of the group may run partly off it,
+    // keeping at least half of each note (and all of its title bar) showing.
+    // Any still left over are cascaded on top. Whatever happens, every note
+    // keeps an uncovered patch big enough to click, so none is lost under
+    // the others.
     _gatherLayout(notes, area) {
         const cx = area.x + area.width / 2;
         const cy = area.y + area.height / 2;
         const bySize = [...notes].sort((a, b) => b.data.w * b.data.h - a.data.w * a.data.h);
-        let placed = [];
-        const overflow = [];
-        for (const note of bySize) {
-            const g = this._nearestFree(note.data.w, note.data.h, placed.map(p => p.g), area, cx, cy);
-            if (g)
-                placed.push({note, g});
-            else
-                overflow.push(note);
-        }
+        let {placed, overflow} = this._pack(bySize, [], area, cx, cy, false);
 
         // Centre the group as a whole (it fits, so the shift stays on screen).
         if (placed.length > 0) {
@@ -1733,6 +1728,15 @@ export default class StickyNotesExtension extends Extension {
                 area.y + GAP - b.y, area.y + area.height - GAP - (b.y + b.h)));
             placed = placed.map(({note, g}) => ({note, g: {...g, x: g.x + dx, y: g.y + dy}}));
         }
+        if (overflow.length === 0)
+            return placed;
+
+        // Too many to fit on screen. Either fill in round the centred group,
+        // or pack the whole group again letting the outer notes run off the
+        // edges; keep whichever leaves fewer notes to cascade.
+        const around = this._pack(overflow, placed, area, cx, cy, true);
+        const spread = this._pack(bySize, [], area, cx, cy, true);
+        ({placed, overflow} = spread.overflow.length < around.overflow.length ? spread : around);
         if (overflow.length === 0)
             return placed;
 
@@ -1804,12 +1808,32 @@ export default class StickyNotesExtension extends Extension {
         return notes.map((note, i) => ({note, g: geoms[i]}));
     }
 
+    // Place each note (in order) at its free spot nearest (cx, cy), after
+    // the ones already placed. Returns the placed notes and those that
+    // found no room.
+    _pack(notes, placed, area, cx, cy, partial) {
+        placed = [...placed];
+        const overflow = [];
+        for (const note of notes) {
+            const g = this._nearestFree(note.data.w, note.data.h, placed.map(p => p.g), area, cx, cy, partial);
+            if (g)
+                placed.push({note, g});
+            else
+                overflow.push(note);
+        }
+        return {placed, overflow};
+    }
+
     // Free spot for a w×h note nearest (cx, cy), or null if none. Besides a
     // coarse grid, tries spots flush against the notes already placed, so
-    // the group packs tightly.
-    _nearestFree(w, h, rects, area, cx, cy) {
-        const x0 = area.x + GAP, x1 = area.x + area.width - GAP - w;
-        const y0 = area.y + GAP, y1 = area.y + area.height - GAP - h;
+    // the group packs tightly. With `partial`, the note may run off the
+    // left, right or bottom edge as long as half of it stays on screen;
+    // its title bar always stays on screen so it can be dragged back.
+    _nearestFree(w, h, rects, area, cx, cy, partial = false) {
+        const x0 = partial ? area.x - Math.floor(w / 2) : area.x + GAP;
+        const x1 = partial ? area.x + area.width - Math.ceil(w / 2) : area.x + area.width - GAP - w;
+        const y0 = area.y + GAP;
+        const y1 = partial ? area.y + area.height - Math.ceil(h / 2) : area.y + area.height - GAP - h;
         if (x1 < x0 || y1 < y0)
             return null;
         const xs = new Set([x0, x1, Math.round(cx - w / 2)]);
@@ -1828,22 +1852,37 @@ export default class StickyNotesExtension extends Extension {
             for (const y of [r.y + r.h + GAP, r.y - GAP - h, r.y, r.y + r.h - h])
                 ys.add(y);
         }
-        const candidates = [];
+        // Column by column: the y spans blocked by notes in the way, then the
+        // free y nearest the centre. Keeps big gathers quick.
+        const ty = cy - h / 2;
+        const ysSorted = [...ys].filter(y => y >= y0 && y <= y1).sort((a, b) => a - b);
+        let best = null, bestD = Infinity;
         for (const x of xs) {
             if (x < x0 || x > x1)
                 continue;
-            for (const y of ys) {
-                if (y >= y0 && y <= y1)
-                    candidates.push({x, y, d: (x + w / 2 - cx) ** 2 + ((y + h / 2 - cy) * aspect) ** 2});
+            const dx2 = (x + w / 2 - cx) ** 2;
+            if (dx2 >= bestD)
+                continue;
+            // A note at y overlaps r (with the gap) when start < y < end.
+            const blocked = rects
+                .filter(r => x < r.x + r.w + GAP && r.x < x + w + GAP)
+                .map(r => [r.y - h - GAP, r.y + r.h + GAP])
+                .sort((a, b) => a[0] - b[0]);
+            let i = 0, reach = -Infinity;
+            for (const y of ysSorted) {
+                // Spans starting before y; is y inside any of them?
+                while (i < blocked.length && blocked[i][0] < y)
+                    reach = Math.max(reach, blocked[i++][1]);
+                if (y < reach)
+                    continue;
+                const d = dx2 + ((y - ty) * aspect) ** 2;
+                if (d < bestD) {
+                    best = {x, y, w, h};
+                    bestD = d;
+                }
             }
         }
-        candidates.sort((a, b) => a.d - b.d);
-        for (const c of candidates) {
-            const r = {x: c.x, y: c.y, w, h};
-            if (!rects.some(o => intersects(r, o, GAP)))
-                return r;
-        }
-        return null;
+        return best;
     }
 
     // Cascade centred on (ax, ay), with steps shrunk to fit the screen but

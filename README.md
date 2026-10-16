@@ -9,7 +9,7 @@ Lightweight sticky notes that sit on your desktop, above windows and below the t
 - **Panel icon** — left-click shows or hides all notes (creates one if none exist). Right-click for:
   - New Note, Show/Hide Notes (each with its keyboard shortcut)
   - Restore Closed (last 10 closed notes are kept)
-  - Arrange: **Tile**, **Cascade**, **Gather** (groups notes around the centre of the screen at their current size, cascading any that don't fit; every note stays clickable), **Restore Layout**
+  - Arrange: **Tile**, **Cascade**, **Gather** (groups notes around the centre of the screen at their current size; when the screen is full, notes round the edge run partly off screen with at least half showing, and any still left over are cascaded; every note stays clickable), **Restore Layout**
   - Options: **Focus On Edit** — enlarge and centre a note while you edit it (off by default); **Live Markdown** — while editing, show every line except the one you're on with its Markdown styled in place, and `- ` list items as bullets (off by default; notes are always saved with plain `-`); **Snap Notes** — when you let go of a moved or resized note, line it up with nearby notes (and the screen edges), with guide lines while dragging (off by default); **Preferences…** — change the shortcuts and snapping options
 - **Notes** — drag by the top bar, resize from the bottom-right corner, cycle through six colours, **+** to add a note beside the current one, **×** to close (second click within 3 s confirms if the note has text).
 - **Placement** — new notes rotate colour automatically and are placed in free space so they don't overlap existing notes.
