@@ -2,7 +2,7 @@
 <schemalist>
   <schema id="org.gnome.shell.extensions.sticky-notes" path="/org/gnome/shell/extensions/sticky-notes/">
     <key name="toggle-notes" type="as">
-      <default><![CDATA[['<Super><Alt>s']]]></default>
+      <default><![CDATA[['<Super><Alt>h']]]></default>
       <summary>Show or hide all notes</summary>
     </key>
     <key name="new-note" type="as">
