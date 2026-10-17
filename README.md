@@ -19,6 +19,16 @@ Lightweight sticky notes that sit on your desktop, above windows and below the t
 
 Notes are stored locally as JSON in `~/.local/share/sticky-notes/notes.json`. Nothing leaves your machine.
 
+### Syncing between computers
+
+In **Preferences → Storage**, choose a folder that a sync tool keeps in step between your computers (for example [Syncthing](https://syncthing.net/) or a Nextcloud client folder), and choose the same folder on each computer. Notes already in that folder are merged with your current notes.
+
+- Only the text and colour of each note are synced, in `notes.json`. Positions, sizes, stacking and show/hide stay separate on each computer, in `~/.local/share/sticky-notes/layout.json`. A note that arrives from another computer is placed in free space.
+- Changes from other computers show up as soon as the sync tool writes them. If the same note was edited on two computers, the most recent edit wins. A note deleted on one computer is deleted on the others too, unless it was edited after it was deleted. **Restore Closed** works on every computer.
+- Conflicting copies made by Syncthing (`notes.sync-conflict-….json`), Nextcloud or Dropbox (`notes (… conflicted copy …).json`) are merged in and then removed.
+- Each computer's clock decides which edit is newest, so keep the clocks set automatically.
+- A network share (NFS or SMB) works, but changes saved by another computer only appear after your next edit here or your next login. GNOME Shell may also freeze while the share can't be reached, so a sync tool is the better choice.
+
 ## Install
 
 Download `sticky-notes.shell-extension.zip` from the [latest release](https://github.com/runnylogan/gnome-shell-sticky-notes/releases/latest), then:
