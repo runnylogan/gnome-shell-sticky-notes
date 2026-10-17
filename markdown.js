@@ -164,6 +164,13 @@ function liveInline(line, from, to, add) {
 }
 
 export function liveSpans(src, rawLines = new Set()) {
+    // A live first character (see toLiveBullets) is styled as its twin,
+    // then every index after it moves on by the extra UTF-16 unit it takes.
+    if (isTwin(src)) {
+        return liveSpans(plainFirst(src), rawLines).map(({start, end, style}) => ({
+            start: start && start + 1, end: end + 1, style,
+        }));
+    }
     const spans = [];
     let offset = 0;
     let inCode = false;
@@ -232,6 +239,35 @@ export function liveSpans(src, rawLines = new Set()) {
 // swap is one character for one, so cursor positions don't move, and they
 // are always undone for saving, for the cursor's line and when editing
 // ends, so notes stay standard Markdown ('[X]' comes back as '[x]').
+//
+// Syntax at the very start of the text can't be shrunk out of sight like
+// the rest: Pango sizes the cursor on every empty line from the text's
+// first character. So when that character is syntax to hide (the '#' of a
+// heading, the '-' of a task, the '**' of bold…), it is swapped for its
+// invisible twin, a Unicode tag character (U+E0000 plus its ASCII code),
+// which takes no space at full size.
+
+const TWIN_BASE = 0xE0000;
+
+function isTwin(src) {
+    const c = src.codePointAt(0);
+    return c >= TWIN_BASE + 0x20 && c <= TWIN_BASE + 0x7E;
+}
+
+function plainFirst(src) {
+    return isTwin(src) ? String.fromCodePoint(src.codePointAt(0) - TWIN_BASE) + src.slice(2) : src;
+}
+
+// The twin for the first character if liveSpans() would hide it.
+function twinFirst(src) {
+    const c = src.codePointAt(0);
+    if (!(c >= 0x20 && c <= 0x7E))
+        return src;
+    const first = src.slice(0, src.indexOf('\n') + 1 || src.length);
+    if (!liveSpans(first).some(sp => sp.start === 0 && sp.style === 'hide'))
+        return src;
+    return String.fromCodePoint(TWIN_BASE + c) + src.slice(1);
+}
 
 const LIVE_MARKERS = ['•', '◦'];
 const LIVE_LIST = /^(\s*)[-*+•◦]\s+(.*)$/;
@@ -255,7 +291,7 @@ function mapOutsideCode(src, fn) {
 
 // Real bullets for '- ' items on every line except keepLine (kept as '-').
 export function toLiveBullets(src, keepLine = -1) {
-    return mapOutsideCode(src, (line, i) => {
+    const live = mapOutsideCode(plainFirst(src), (line, i) => {
         if (i === keepLine)
             return plainLine(line);
         if (TASK_BOX.test(line))
@@ -266,6 +302,7 @@ export function toLiveBullets(src, keepLine = -1) {
         const indent = m[1].replace(/\t/g, '    ');
         return `${m[1]}${indent.length >= 2 ? '◦' : '•'}${line.slice(m[1].length + 1)}`;
     });
+    return keepLine === 0 ? live : twinFirst(live);
 }
 
 function plainLine(line) {
@@ -276,5 +313,5 @@ function plainLine(line) {
 
 // Back to plain '- ' list markers and '[ ]' / '[x]' checkboxes.
 export function fromLiveBullets(src) {
-    return mapOutsideCode(src, plainLine);
+    return mapOutsideCode(plainFirst(src), plainLine);
 }

@@ -809,20 +809,20 @@ class Note {
         // Replacing the attributes drops St's text colour, so restate it.
         colour(mixColour(fg, fg, 0), 0, text.length);
         const muted = mixColour(fg, bg, 0.55);
-        let mutedTo = -1;
+        // An invisible twin of the first character (see markdown.js) is
+        // left at full size; the 2 is its UTF-16 length.
+        const twin = text.codePointAt(0) >= 0xE0000 ? 2 : 0;
         for (const span of liveSpans(text, new Set([cursorLine]))) {
-            const {start, end} = span;
-            let {style} = span;
+            let {start, style} = span;
+            const {end} = span;
+            if (style === 'hide' && start === 0)
+                start = twin;
             // Pango sizes every empty line (and the cursor on it) from the
-            // styling at the very start of the text, so syntax there is
-            // muted rather than shrunk, or empty lines get a dot of a cursor.
-            // A checkbox there keeps its closing ']' muted to match.
-            if (style === 'hide' && (start === 0 || start === mutedTo)) {
+            // styling at the very start of the text, so syntax there that
+            // isn't a twin yet is muted rather than shrunk, or empty lines
+            // get a dot of a cursor.
+            if (style === 'hide' && start === 0)
                 style = 'muted';
-                mutedTo = end;
-            } else if (style === 'box' && start === mutedTo) {
-                mutedTo = end;
-            }
             switch (style) {
             case 'hide':
                 // Shrink to almost nothing, in the note's own colour.
