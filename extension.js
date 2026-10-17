@@ -106,6 +106,21 @@ function shortcutLabel(accel) {
 }
 
 // Byte offset of every UTF-16 index in text (Pango attributes use bytes).
+// A one-line layout of text in a ClutterText's font, without its styling.
+function plainLayout(ct, text) {
+    const layout = ct.get_layout()?.copy();
+    if (!layout)
+        return null;
+    layout.set_attributes(null);
+    layout.set_width(-1);
+    layout.set_text(text, -1);
+    return layout;
+}
+
+function pangoRect(x, y, width, height) {
+    return Object.assign(new Pango.Rectangle(), {x, y, width, height});
+}
+
 function byteOffsets(text) {
     const offsets = new Array(text.length + 1);
     let bytes = 0;
@@ -661,7 +676,11 @@ class Note {
         // St resets the text's attributes on every style change (focus,
         // hover, zoom), so put the live styling back after it has.
         this._entry.connect_after('style-changed', () => this._syncLiveStyle(true));
-        ct.connect('notify::width', () => this._syncTextHeight());
+        ct.connect('notify::width', () => {
+            this._syncTextHeight();
+            this._queueRules();
+        });
+        this._view.clutter_text.connect('notify::width', () => this._queueRules());
 
         // Keep the cursor in view while typing or moving through a long note.
         ct.connect('cursor-changed', () => this._ensureCursorVisible());
@@ -786,7 +805,7 @@ class Note {
         const cursorLine = before.filter(c => c === '\n').length;
         this._queueBullets();
         const text = ct.get_text();
-        const key = `${cursorLine}\n${text}`;
+        const key = `${cursorLine}\n${Math.round(ct.width)}\n${text}`;
         if (!force && key === this._liveKey)
             return false;
         this._liveKey = key;
@@ -812,6 +831,7 @@ class Note {
         // An invisible twin of the first character (see markdown.js) is
         // left at full size; the 2 is its UTF-16 length.
         const twin = text.codePointAt(0) >= 0xE0000 ? 2 : 0;
+        this._liveRules = false;
         for (const span of liveSpans(text, new Set([cursorLine]))) {
             let {start, style} = span;
             const {end} = span;
@@ -857,6 +877,28 @@ class Note {
                 add(Pango.attr_strikethrough_new(true), start, end);
                 colour(muted, start, end);
                 break;
+            case 'rule': {
+                // A line across the note: the characters (all ASCII) become
+                // empty boxes sharing its width, with a line struck through
+                // them. The last box is left empty, as the line stops short
+                // of it. (Letter spacing can't do this: Pango wraps the line
+                // well before the spaced characters reach the edge.)
+                const plain = plainLayout(ct, 'x');
+                if (!plain || !(ct.width > 2)) {
+                    colour(muted, start, end);
+                    break;
+                }
+                const [, logical] = plain.get_extents();
+                const box = width => pangoRect(0, -plain.get_baseline(), width, logical.height);
+                const none = pangoRect(0, 0, 0, 0);
+                const each = Math.floor((ct.width - 2) * Pango.SCALE / (end - start - 1));
+                add(Pango.attr_shape_new(none, box(each)), start, end - 1);
+                add(Pango.attr_shape_new(none, box(0)), end - 1, end);
+                add(Pango.attr_strikethrough_new(true), start, end);
+                add(Pango.attr_strikethrough_color_new(...muted), start, end);
+                this._liveRules = true;
+                break;
+            }
             case 'quote':
                 add(Pango.attr_style_new(Pango.Style.ITALIC), start, end);
                 colour(muted, start, end);
@@ -1089,7 +1131,9 @@ class Note {
             this._showEditor();
             return;
         }
-        const {markup, tasks} = render(text);
+        this._ruleCount = this._ruleChars();
+        const {markup, tasks, rules} = render(text, this._ruleCount);
+        this._viewRules = rules;
         this._tasks = tasks;
         let ok = false;
         try {
@@ -1105,6 +1149,30 @@ class Note {
         this._editor.hide();
         this._view.show();
         this._syncLiveStyle();
+    }
+
+    // How many '─' fit across the rendered view, so a rule spans the note.
+    _ruleChars() {
+        const vt = this._view.clutter_text;
+        const w = (plainLayout(vt, '─'.repeat(10))?.get_pixel_size()[0] ?? 0) / 10;
+        return vt.width > 0 && w > 0 ? Math.max(3, Math.floor((vt.width - 2) / w)) : 24;
+    }
+
+    // Rules span the note, so redraw them when its width changes (once
+    // allocation is over).
+    _queueRules() {
+        if (this._rulesId || !(this.isEditing ? this._liveRules : this._viewRules))
+            return;
+        this._rulesId = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            this._rulesId = 0;
+            if (!this.isEditing) {
+                if (this._ruleChars() !== this._ruleCount)
+                    this.showRendered();
+            } else if (this._syncLiveStyle()) {
+                this._syncTextHeight();
+            }
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     // Text position nearest a stage point (-1, the end, if it can't be mapped).
@@ -1337,6 +1405,10 @@ class Note {
         if (this._bulletsId) {
             GLib.source_remove(this._bulletsId);
             this._bulletsId = 0;
+        }
+        if (this._rulesId) {
+            GLib.source_remove(this._rulesId);
+            this._rulesId = 0;
         }
         this._cancelZoomLater();
         this._animGen = (this._animGen ?? 0) + 1;
