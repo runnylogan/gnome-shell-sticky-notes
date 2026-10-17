@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 runnylogan
-// Preferences: keyboard shortcuts and snapping options.
+// Preferences: keyboard shortcuts, snapping options and the notes folder.
 
 import Adw from 'gi://Adw';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Gtk from 'gi://Gtk';
 
@@ -98,6 +99,58 @@ class StickyNotesShortcutRow extends Adw.ActionRow {
     }
 });
 
+// The folder notes.json is kept in, chosen with a folder picker. Pointing it
+// at a folder a sync tool shares (Syncthing, Nextcloud…) shares the notes.
+const FolderRow = GObject.registerClass(
+class StickyNotesFolderRow extends Adw.ActionRow {
+    _init(settings) {
+        super._init({title: 'Notes folder', subtitle_selectable: true});
+        this._settings = settings;
+
+        const choose = new Gtk.Button({
+            icon_name: 'folder-open-symbolic',
+            tooltip_text: 'Choose folder…',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+        });
+        choose.connect('clicked', () => this._choose());
+        this.add_suffix(choose);
+        this.activatable_widget = choose;
+
+        const reset = new Gtk.Button({
+            icon_name: 'edit-undo-symbolic',
+            tooltip_text: 'Use the default folder',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+        });
+        reset.connect('clicked', () => settings.reset('storage-dir'));
+        this.add_suffix(reset);
+
+        this._changedId = settings.connect('changed::storage-dir', () => this._sync());
+        this.connect('destroy', () => settings.disconnect(this._changedId));
+        this._sync();
+    }
+
+    _sync() {
+        const dir = this._settings.get_string('storage-dir');
+        this.subtitle = dir || '~/.local/share/sticky-notes (default)';
+    }
+
+    _choose() {
+        const dialog = new Gtk.FileDialog({title: 'Choose Notes Folder', modal: true});
+        const dir = this._settings.get_string('storage-dir');
+        if (dir)
+            dialog.initial_folder = Gio.File.new_for_path(dir.replace(/^~(?=\/|$)/, GLib.get_home_dir()));
+        dialog.select_folder(this.get_root(), null, (_d, result) => {
+            try {
+                const path = dialog.select_folder_finish(result)?.get_path();
+                if (path)
+                    this._settings.set_string('storage-dir', path);
+            } catch (_e) {}   // cancelled
+        });
+    }
+});
+
 export default class StickyNotesPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
@@ -120,6 +173,15 @@ export default class StickyNotesPreferences extends ExtensionPreferences {
             snapping.add(row);
         }
         page.add(snapping);
+
+        const storage = new Adw.PreferencesGroup({
+            title: 'Storage',
+            description: 'To share notes between computers, choose a folder kept in sync by ' +
+                'Syncthing, Nextcloud or similar. Notes already in it are merged with these. ' +
+                'Positions and sizes stay separate on each computer.',
+        });
+        storage.add(new FolderRow(settings));
+        page.add(storage);
         window.add(page);
     }
 }

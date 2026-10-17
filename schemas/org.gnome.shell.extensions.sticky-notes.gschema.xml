@@ -33,5 +33,9 @@
       <default>false</default>
       <summary>Style Markdown in place while editing, except on the cursor's line</summary>
     </key>
+    <key name="storage-dir" type="s">
+      <default>''</default>
+      <summary>Folder for notes.json, for example one kept in sync between computers; empty for ~/.local/share/sticky-notes</summary>
+    </key>
   </schema>
 </schemalist>

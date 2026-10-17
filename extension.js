@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2026 runnylogan
 // Sticky Notes — GNOME Shell 50–51 (with Markdown rendering)
 // Notes live in a layer above windows and below the top panel, are hidden in
-// the Overview, and are stored in ~/.local/share/sticky-notes/notes.json.
+// the Overview, and are stored in ~/.local/share/sticky-notes/notes.json (or
+// a folder chosen in Preferences, which a sync tool can share).
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -38,6 +39,8 @@ const HEADER_RIGHT = 32;  // close button, right of the drag handle
 const BAR_CLEAR = 6;      // gap left below a title bar a note is gathered over
 const ANIM_MS = 220;
 const TRASH_MAX = 10;     // closed notes kept for 'Restore Closed'
+const SYNC_DELAY_MS = 300; // wait for a sync tool to finish writing
+const TOMBSTONE_DAYS = 60; // how long other computers are told a note was deleted
 
 function workArea() {
     const index = Main.layoutManager.primaryIndex;
@@ -220,39 +223,243 @@ function setActorCursor(actor, ...names) {
 
 // ---------------------------------------------------------------- storage
 
+// The notes themselves (text, colour) are kept in notes.json, in a folder
+// that may be shared between computers by a sync tool (Syncthing, Nextcloud
+// and the like). Everything about how they're laid out on this computer's
+// screens (positions, sizes, stacking, shown or hidden) is kept beside it in
+// a layout.json that always stays local.
+
+const SHARED_FIELDS = ['id', 'text', 'colour', 'modified'];
+// Copies a sync tool leaves when two computers changed notes.json at once:
+// Syncthing's notes.sync-conflict-….json, Nextcloud's and Dropbox's
+// 'notes (… conflicted copy …).json'.
+const CONFLICT_RE = /^notes[ .].*conflict.*\.json$/i;
+
+function sharedNote(data) {
+    return Object.fromEntries(SHARED_FIELDS.map(k => [k, data[k]]));
+}
+
+function closedTime(data) {
+    return Date.parse(data.closedAt ?? '') || 0;
+}
+
+// Combine two copies of the shared notes. Each note keeps whichever copy was
+// changed last (this computer's on a tie), and a note deleted on either goes
+// unless it was changed after that. Closed notes are pooled, minus any that
+// were reopened. Order follows `local`, with notes new to it at the end.
+function mergeShared(local, other) {
+    const deleted = {...local.deleted};
+    for (const [id, time] of Object.entries(other.deleted))
+        deleted[id] = Math.max(deleted[id] ?? 0, time);
+    const cutoff = Date.now() - TOMBSTONE_DAYS * 24 * 3600 * 1000;
+    for (const [id, time] of Object.entries(deleted)) {
+        if (time < cutoff)
+            delete deleted[id];
+    }
+
+    const latest = new Map();
+    for (const n of [...local.notes, ...other.notes]) {
+        const prev = latest.get(n.id);
+        if (!prev || (n.modified ?? 0) > (prev.modified ?? 0))
+            latest.set(n.id, n);
+    }
+    const notes = [...latest.values()].filter(n => !((deleted[n.id] ?? -1) >= (n.modified ?? 0)));
+    const open = new Set(notes.map(n => n.id));
+
+    const closed = new Map();
+    for (const t of [...local.trash, ...other.trash]) {
+        const prev = closed.get(t.id);
+        if (!open.has(t.id) && (!prev || closedTime(t) > closedTime(prev)))
+            closed.set(t.id, t);
+    }
+    const trash = [...closed.values()]
+        .sort((a, b) => closedTime(a) - closedTime(b))
+        .slice(-TRASH_MAX);
+    return {notes, trash, deleted};
+}
+
+// The shared file's contents in a fixed order, so two computers holding the
+// same notes write the same bytes (and a sync tool sees nothing to send).
+function sharedText(shared) {
+    const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const deleted = Object.fromEntries(Object.entries(shared.deleted).sort());
+    return JSON.stringify({
+        notes: shared.notes.map(sharedNote).sort(byId),
+        trash: shared.trash,
+        deleted,
+    }, null, 2);
+}
+
+function normaliseShared(raw) {
+    const list = v => (Array.isArray(v) ? v.filter(n => n && typeof n.id === 'string') : []);
+    return {
+        notes: list(raw.notes),
+        trash: list(raw.trash),
+        deleted: raw.deleted && typeof raw.deleted === 'object' ? raw.deleted : {},
+        raw,
+    };
+}
+
 class NoteStore {
-    constructor() {
-        this._dir = GLib.build_filenamev([GLib.get_user_data_dir(), 'sticky-notes']);
+    constructor(dir) {
+        const local = GLib.build_filenamev([GLib.get_user_data_dir(), 'sticky-notes']);
+        this._localDir = local;
+        this._layoutPath = GLib.build_filenamev([local, 'layout.json']);
+        this._dir = dir || local;
         this._path = GLib.build_filenamev([this._dir, 'notes.json']);
+        this._seen = null;         // notes.json as last read or written here
+        this._layoutSeen = null;
+        this._monitor = null;
     }
 
     load() {
-        const empty = {visible: true, notes: []};
-        if (!GLib.file_test(this._path, GLib.FileTest.EXISTS))
-            return empty;
+        const shared = this.readShared() ?? normaliseShared({});
+        const layout = this._readJson(this._layoutPath) ?? {};
+        // Before layout.json, notes.json held everything: take the layout
+        // from it until the first save splits them.
+        const from = Array.isArray(layout.notes) ? layout : shared.raw;
+        const geometry = new Map((Array.isArray(from.notes) ? from.notes : [])
+            .filter(g => g && typeof g.id === 'string')
+            .map((g, i) => [g.id, {x: g.x, y: g.y, w: g.w, h: g.h, i}]));
+        const order = n => geometry.get(n.id)?.i ?? Infinity;
+        const notes = [...shared.notes]
+            .sort((a, b) => order(a) - order(b))
+            .map(n => {
+                const {i: _i, ...g} = geometry.get(n.id) ?? {};
+                return {...sharedNote(n), ...g};
+            });
+        return {
+            visible: typeof from.visible === 'boolean' ? from.visible : true,
+            arranged: from.arranged,
+            savedLayout: from.savedLayout,
+            lastColour: from.lastColour,
+            notes,
+            trash: shared.trash,
+            deleted: shared.deleted,
+        };
+    }
+
+    // notes.json as {notes, trash, deleted}, or null if there's none (or
+    // it was unreadable, in which case it's moved aside). With
+    // `changedOnly`, also null if it's what was last read or written here.
+    readShared(changedOnly = false) {
+        const text = this._readText(this._path);
+        if (text === null || (changedOnly && text === this._seen))
+            return null;
+        this._seen = text;
         try {
-            const [, bytes] = GLib.file_get_contents(this._path);
-            const state = JSON.parse(new TextDecoder().decode(bytes));
-            if (!Array.isArray(state.notes))
-                state.notes = [];
-            if (typeof state.visible !== 'boolean')
-                state.visible = true;
-            return state;
+            return normaliseShared(JSON.parse(text));
         } catch (e) {
             // Keep the unreadable file rather than overwriting it.
             const backup = `${this._path}.corrupt-${GLib.DateTime.new_now_local().format('%Y%m%d-%H%M%S')}`;
             GLib.rename(this._path, backup);
             console.error(`[sticky-notes] Could not read notes, moved to ${backup}: ${e}`);
-            return empty;
+            return null;
         }
     }
 
-    save(state) {
+    // Conflicting copies of notes.json beside it, as [path, contents].
+    // Unreadable ones are left alone.
+    readConflicts() {
+        const found = [];
+        try {
+            const dir = Gio.File.new_for_path(this._dir);
+            const children = dir.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+            let info;
+            while ((info = children.next_file(null))) {
+                const name = info.get_name();
+                if (!CONFLICT_RE.test(name))
+                    continue;
+                const path = GLib.build_filenamev([this._dir, name]);
+                try {
+                    found.push([path, normaliseShared(JSON.parse(this._readText(path)))]);
+                } catch (e) {
+                    console.error(`[sticky-notes] Could not read ${path}: ${e}`);
+                }
+            }
+            children.close(null);
+        } catch (_e) {}   // no folder yet
+        return found;
+    }
+
+    // Write notes.json if it has changed. Returns false if it couldn't be.
+    writeShared(shared) {
+        const text = sharedText(shared);
+        if (text === this._seen)
+            return true;
+        if (!this._write(this._dir, this._path, text))
+            return false;
+        this._seen = text;
+        return true;
+    }
+
+    writeLayout(state) {
+        const text = JSON.stringify({
+            visible: state.visible,
+            arranged: state.arranged,
+            savedLayout: state.savedLayout,
+            lastColour: state.lastColour,
+            notes: state.notes.map(({id, x, y, w, h}) => ({id, x, y, w, h})),
+        }, null, 2);
+        if (text !== this._layoutSeen && this._write(this._localDir, this._layoutPath, text))
+            this._layoutSeen = text;
+    }
+
+    // Call `callback` when notes.json, or a conflicting copy of it, appears
+    // or changes. Only sees changes made through this computer's file
+    // system (a sync tool writing the folder), not ones made on a network
+    // share by another computer.
+    monitor(callback) {
         try {
             GLib.mkdir_with_parents(this._dir, 0o700);
-            GLib.file_set_contents(this._path, JSON.stringify(state, null, 2));
+            this._monitor = Gio.File.new_for_path(this._dir)
+                .monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, null);
         } catch (e) {
-            console.error(`[sticky-notes] Could not save notes: ${e}`);
+            console.error(`[sticky-notes] Can't watch ${this._dir} for changes: ${e}`);
+            return;
+        }
+        const ours = file => {
+            const name = file?.get_basename();
+            return name === 'notes.json' || CONFLICT_RE.test(name ?? '');
+        };
+        this._monitor.connect('changed', (_m, file, other) => {
+            if (ours(file) || ours(other))
+                callback();
+        });
+    }
+
+    destroy() {
+        this._monitor?.cancel();
+        this._monitor = null;
+    }
+
+    _readText(path) {
+        try {
+            const [, bytes] = GLib.file_get_contents(path);
+            return new TextDecoder().decode(bytes);
+        } catch (_e) {
+            return null;   // not there (yet)
+        }
+    }
+
+    _readJson(path) {
+        try {
+            const text = this._readText(path);
+            return text === null ? null : JSON.parse(text);
+        } catch (e) {
+            console.error(`[sticky-notes] Could not read ${path}: ${e}`);
+            return null;
+        }
+    }
+
+    _write(dir, path, text) {
+        try {
+            GLib.mkdir_with_parents(dir, 0o700);
+            GLib.file_set_contents(path, text);
+            return true;
+        } catch (e) {
+            console.error(`[sticky-notes] Could not save ${path}: ${e}`);
+            return false;
         }
     }
 }
@@ -321,7 +528,11 @@ class Note {
             if (this._swappingBullets)
                 return;
             // Live bullets (•) are only for show: always save plain '-'.
-            this.data.text = fromLiveBullets(ct.get_text());
+            const text = fromLiveBullets(ct.get_text());
+            if (text !== this.data.text) {
+                this.data.text = text;
+                this.data.modified = Date.now();
+            }
             this._syncHint();
             this._syncLiveStyle(true);
             this._syncTextHeight();
@@ -1035,8 +1246,31 @@ class Note {
     _cycleColour() {
         const i = COLOURS.indexOf(this.data.colour);
         this.data.colour = COLOURS[(i + 1) % COLOURS.length];
+        this.data.modified = Date.now();
         this._applyColour();
         this._manager.scheduleSave();
+    }
+
+    // Take the text and colour from a newer copy of the note (from another
+    // computer), keeping the cursor where it was if it's being edited.
+    setContent({text, colour, modified}) {
+        this.data.modified = modified;
+        this.data.colour = colour;
+        this._applyColour();
+        if (text === this.data.text)
+            return;
+        // Set first, so the editor's change doesn't count as a new edit.
+        this.data.text = text ?? '';
+        const ct = this._entry.clutter_text;
+        const cursor = ct.get_cursor_position();
+        ct.set_text(this.data.text);
+        const length = [...this.data.text].length;
+        if (cursor >= 0 && cursor <= length) {
+            ct.set_cursor_position(cursor);
+            ct.set_selection_bound(cursor);
+        }
+        if (!this.isEditing || !ct.has_key_focus())
+            this.showRendered();
     }
 
     _onDelete() {
@@ -1204,10 +1438,12 @@ class StickyNotesIndicator extends PanelMenu.Button {
 
 export default class StickyNotesExtension extends Extension {
     enable() {
-        this._store = new NoteStore();
+        this._settings = this.getSettings();
+        this._store = new NoteStore(this._storageDir());
         this._state = this._store.load();
         this._notes = new Map();
         this._saveId = 0;
+        this._syncId = 0;
         this._signals = [];
 
         // Layer for all notes: above windows, below the top panel and its menus.
@@ -1225,7 +1461,6 @@ export default class StickyNotesExtension extends Extension {
         Main.panel.addToStatusArea(this.uuid, this._indicator);
         this._indicator.sync(this.visible);
 
-        this._settings = this.getSettings();
         this._interface = new Gio.Settings({schema_id: 'org.gnome.desktop.interface'});
         this._prevWindow = null;
         const mode = Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW;
@@ -1290,6 +1525,11 @@ export default class StickyNotesExtension extends Extension {
                 note.clampToScreen();
         });
 
+        // Changes from other computers, via a sync tool or a moved folder.
+        this._store.monitor(() => this._syncSoon());
+        this._connect(this._settings, 'changed::storage-dir', () => this._moveStorage());
+        this._syncSoon();   // conflicting copies left while logged out
+
         this._syncLayer();
     }
 
@@ -1304,6 +1544,10 @@ export default class StickyNotesExtension extends Extension {
         if (this._saveId) {
             GLib.source_remove(this._saveId);
             this._saveId = 0;
+        }
+        if (this._syncId) {
+            GLib.source_remove(this._syncId);
+            this._syncId = 0;
         }
         if (this._focusLaterId) {
             GLib.source_remove(this._focusLaterId);
@@ -1341,6 +1585,7 @@ export default class StickyNotesExtension extends Extension {
         this._interface = null;
         this._prevWindow = null;
         this._state = null;
+        this._store.destroy();
         this._store = null;
     }
 
@@ -1520,6 +1765,7 @@ export default class StickyNotesExtension extends Extension {
             h: DEFAULT_H,
             colour,
             text: '',
+            modified: Date.now(),
         };
         this._state.notes.push(data);
         const note = this._addNote(data);
@@ -1551,7 +1797,9 @@ export default class StickyNotesExtension extends Extension {
     // First position (nearest the preferred point) that overlaps no note.
     _freeSpot(w, h, fromNote) {
         const area = workArea();
-        const rects = this._state.notes.map(n => ({x: n.x, y: n.y, w: n.w, h: n.h}));
+        const rects = this._state.notes
+            .filter(n => n.x != null && n.y != null)
+            .map(n => ({x: n.x, y: n.y, w: n.w, h: n.h}));
         const pref = fromNote
             ? {x: fromNote.data.x + fromNote.data.w + GAP, y: fromNote.data.y}
             : {x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 3};
@@ -1991,6 +2239,7 @@ export default class StickyNotesExtension extends Extension {
             return;
         const data = this._state.trash.pop();
         delete data.closedAt;
+        data.modified = Date.now();   // newer than its deletion, for other computers
         this._state.notes.push(data);
         const note = this._addNote(data);
         if (!this.visible)
@@ -2004,11 +2253,17 @@ export default class StickyNotesExtension extends Extension {
         this._state.trash ??= [];
         this._state.trash.push({...note.data, closedAt: GLib.DateTime.new_now_local().format_iso8601()});
         this._state.trash = this._state.trash.slice(-TRASH_MAX);
+        this._state.deleted ??= {};
+        this._state.deleted[note.data.id] = Date.now();
+        this._removeNote(note);
+        this.scheduleSave();
+    }
+
+    _removeNote(note) {
         this._notes.delete(note.data.id);
         this._state.notes = this._state.notes.filter(n => n.id !== note.data.id);
         Main.layoutManager.untrackChrome(note.actor);
         note.destroy();
-        this.scheduleSave();
     }
 
     scheduleSave() {
@@ -2021,17 +2276,93 @@ export default class StickyNotesExtension extends Extension {
         });
     }
 
+    // Save, first merging in any changes from other computers: notes.json
+    // if it has changed since it was last read or written here, and any
+    // conflicting copies of it, which are removed once merged.
     _saveNow() {
-        if (this._store && this._state)
-            this._store.save(this._state);
+        if (!this._store || !this._state)
+            return;
+        const theirs = this._store.readShared(true);
+        if (theirs)
+            this._merge(theirs);
+        const conflicts = this._store.readConflicts();
+        for (const [, copy] of conflicts)
+            this._merge(copy);
+        const saved = this._store.writeShared({
+            notes: this._state.notes,
+            trash: this._state.trash ?? [],
+            deleted: this._state.deleted ?? {},
+        });
+        if (saved) {
+            for (const [path] of conflicts)
+                GLib.unlink(path);
+        }
+        this._store.writeLayout(this._state);
+    }
+
+    _syncSoon() {
+        if (this._syncId)
+            GLib.source_remove(this._syncId);
+        this._syncId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, SYNC_DELAY_MS, () => {
+            this._syncId = 0;
+            this._saveNow();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    // Bring another copy of the shared notes into this one, and onto the
+    // screen: new notes are placed in free space, keeping this computer's
+    // layout for the rest.
+    _merge(other) {
+        const merged = mergeShared({
+            notes: this._state.notes,
+            trash: this._state.trash ?? [],
+            deleted: this._state.deleted ?? {},
+        }, other);
+        const keep = new Set(merged.notes.map(n => n.id));
+        for (const note of [...this._notes.values()]) {
+            if (!keep.has(note.data.id))
+                this._removeNote(note);
+        }
+        for (const n of merged.notes) {
+            const note = this._notes.get(n.id);
+            if (!note) {
+                const data = {...sharedNote(n)};
+                this._state.notes.push(data);
+                this._addNote(data);
+            } else if (n.modified !== note.data.modified) {
+                note.setContent(n);
+            }
+        }
+        this._state.trash = merged.trash;
+        this._state.deleted = merged.deleted;
+    }
+
+    _storageDir() {
+        const dir = this._settings.get_string('storage-dir').trim();
+        if (!dir)
+            return null;
+        const home = GLib.get_home_dir();
+        if (dir === '~' || dir.startsWith('~/'))
+            return GLib.build_filenamev([home, dir.slice(1)]);
+        return GLib.path_is_absolute(dir) ? dir : GLib.build_filenamev([home, dir]);
+    }
+
+    // Save to the old folder, then merge with whatever is in the new one.
+    _moveStorage() {
+        this._saveNow();
+        this._store.destroy();
+        this._store = new NoteStore(this._storageDir());
+        this._store.monitor(() => this._syncSoon());
+        this._saveNow();
     }
 
     _addNote(data) {
         data.id ??= GLib.uuid_string_random();
         data.w = Math.max(MIN_W, data.w ?? DEFAULT_W);
         data.h = Math.max(MIN_H, data.h ?? DEFAULT_H);
-        data.x ??= 100;
-        data.y ??= 100;
+        if (data.x == null || data.y == null)
+            Object.assign(data, this._freeSpot(data.w, data.h, null));
         const note = new Note(this, data);
         this._layer.add_child(note.actor);
         Main.layoutManager.trackChrome(note.actor, {trackFullscreen: true});
