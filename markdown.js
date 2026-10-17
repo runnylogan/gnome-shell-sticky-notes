@@ -54,12 +54,15 @@ const FENCE = /^\s*(```|~~~)/;
 
 const HEADING_SIZE = ['x-large', 'large', 'medium', 'medium', 'medium', 'medium'];
 
-// Returns {markup, tasks}; tasks maps a displayed line number to the source
-// line holding a checkbox, plus the checkbox's character column in the
-// displayed line, so clicks can toggle it.
-export function render(src) {
+// Returns {markup, tasks, rules}; tasks maps a displayed line number to the
+// source line holding a checkbox, plus the checkbox's character column in
+// the displayed line, so clicks can toggle it. Horizontal rules are drawn
+// ruleChars '─' long (sized by the caller to the note's width); rules is
+// true if there are any.
+export function render(src, ruleChars = 24) {
     const lines = src.split('\n');
     const out = [];
+    let rules = false;
     const tasks = new Map();
     let inCode = false;
 
@@ -79,7 +82,8 @@ export function render(src) {
             const level = m[1].length;
             out.push(`<span size="${HEADING_SIZE[level - 1]}" weight="bold">${inline(m[2])}</span>`);
         } else if (RULE.test(line)) {
-            out.push(`<span foreground="${MUTED}">${'─'.repeat(24)}</span>`);
+            out.push(`<span foreground="${MUTED}">${'─'.repeat(ruleChars)}</span>`);
+            rules = true;
         } else if ((m = line.match(TASK))) {
             const indent = m[1].replace(/\t/g, '    ');
             const done = m[2] !== ' ';
@@ -103,7 +107,7 @@ export function render(src) {
         }
     });
 
-    return {markup: out.join('\n'), tasks};
+    return {markup: out.join('\n'), tasks, rules};
 }
 
 // Flip the checkbox on a source line.
@@ -122,7 +126,8 @@ export function toggleTask(src, lineIndex) {
 // so instead the source is styled in place. liveSpans() returns
 // {start, end, style} ranges as string indices into src; styles are 'hide'
 // (syntax to tuck away), 'muted' (syntax left visible), 'h1'…'h6', 'bold',
-// 'italic', 'strike', 'code', 'link', 'box', 'done' and 'quote'. Lines in
+// 'italic', 'strike', 'code', 'link', 'box', 'done', 'quote' and 'rule' (a
+// horizontal rule, to draw as a line across the note). Lines in
 // rawLines (e.g. the cursor's) are left unstyled so they edit as plain text.
 
 function liveInline(line, from, to, add) {
@@ -199,7 +204,7 @@ export function liveSpans(src, rawLines = new Set()) {
                 add(start + m[2].length, line.length, 'hide');
             }
         } else if (RULE.test(line)) {
-            add(0, line.length, 'muted');
+            add(0, line.length, 'rule');
         } else if ((m = line.match(LIVE_TASK))) {
             // '- [' and ']' are tucked away round a live checkbox (☐, ☑).
             const box = m[1].length + 3;
