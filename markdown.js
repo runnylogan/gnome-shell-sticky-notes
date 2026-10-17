@@ -193,12 +193,14 @@ export function liveSpans(src, rawLines = new Set()) {
             }
         } else if (RULE.test(line)) {
             add(0, line.length, 'muted');
-        } else if ((m = line.match(TASK))) {
-            const box = m[1].length + 2;
+        } else if ((m = line.match(LIVE_TASK))) {
+            // '- [' and ']' are tucked away round a live checkbox (☐, ☑).
+            const box = m[1].length + 3;
             add(m[1].length, box, 'hide');
-            add(box, box + 3, 'box');
+            add(box, box + 1, 'box');
+            add(box + 1, box + 2, 'hide');
             const body = line.length - m[4].length;
-            if (m[2] !== ' ')
+            if (m[2] !== ' ' && m[2] !== '☐')
                 add(body, line.length, 'done');
             liveInline(line, body, line.length, add);
         } else if ((m = line.match(LIVE_LIST))) {
@@ -225,14 +227,19 @@ export function liveSpans(src, rawLines = new Set()) {
 // ---- live bullets
 // With Live Markdown on, a '- ' list marker on any line but the cursor's is
 // swapped in the editor's text for a real bullet (•, or ◦ when indented,
-// as in the rendered view). The swap is one character for one, so cursor
-// positions don't move, and it is always undone for saving, for the
-// cursor's line and when editing ends, so notes stay standard Markdown.
+// as in the rendered view), and the space or x in a task's '[ ]' / '[x]'
+// for a checkbox (☐, ☑), with the brackets tucked away by liveSpans(). Each
+// swap is one character for one, so cursor positions don't move, and they
+// are always undone for saving, for the cursor's line and when editing
+// ends, so notes stay standard Markdown ('[X]' comes back as '[x]').
 
 const LIVE_MARKERS = ['•', '◦'];
 const LIVE_LIST = /^(\s*)[-*+•◦]\s+(.*)$/;
-const DASH_ITEM = /^(\s*)- (?!\[[ xX]\](\s|$))/;
+const LIVE_TASK = /^(\s*)[-*+] \[( |x|X|☐|☑)\](\s+|$)(.*)$/;
+const DASH_ITEM = /^(\s*)- (?!\[[ xX☐☑]\](\s|$))/;
 const LIVE_ITEM = /^(\s*)[•◦] /;
+const TASK_BOX = /^(\s*[-*+] \[)( |x|X)(\](\s|$))/;
+const LIVE_BOX = /^(\s*[-*+] \[)(☐|☑)(\](\s|$))/;
 
 // Apply fn to each line outside fenced code blocks.
 function mapOutsideCode(src, fn) {
@@ -250,7 +257,9 @@ function mapOutsideCode(src, fn) {
 export function toLiveBullets(src, keepLine = -1) {
     return mapOutsideCode(src, (line, i) => {
         if (i === keepLine)
-            return line.replace(LIVE_ITEM, '$1- ');
+            return plainLine(line);
+        if (TASK_BOX.test(line))
+            return line.replace(TASK_BOX, (_m, a, state, b) => `${a}${state === ' ' ? '☐' : '☑'}${b}`);
         const m = line.match(DASH_ITEM);
         if (!m || RULE.test(line))
             return line;
@@ -259,7 +268,13 @@ export function toLiveBullets(src, keepLine = -1) {
     });
 }
 
-// Back to plain '- ' list markers.
+function plainLine(line) {
+    return line
+        .replace(LIVE_ITEM, '$1- ')
+        .replace(LIVE_BOX, (_m, a, box, b) => `${a}${box === '☐' ? ' ' : 'x'}${b}`);
+}
+
+// Back to plain '- ' list markers and '[ ]' / '[x]' checkboxes.
 export function fromLiveBullets(src) {
-    return mapOutsideCode(src, line => line.replace(LIVE_ITEM, '$1- '));
+    return mapOutsideCode(src, plainLine);
 }

@@ -133,6 +133,7 @@ function mixColour(a, b, t) {
 const LIVE_MAX_CHARS = 5000;
 const LIVE_HEADING_SCALE = [1.44, 1.2, 1, 1, 1, 1];   // as x-large, large, medium
 const LIVE_LINK = [0x1a, 0x5f, 0xb4].map(c => c * 257);
+const LIVE_BOX_SCALE = 1.5;   // checkboxes, as BOX_SIZE in markdown.js
 
 // ---- snapping
 
@@ -808,14 +809,20 @@ class Note {
         // Replacing the attributes drops St's text colour, so restate it.
         colour(mixColour(fg, fg, 0), 0, text.length);
         const muted = mixColour(fg, bg, 0.55);
+        let mutedTo = -1;
         for (const span of liveSpans(text, new Set([cursorLine]))) {
             const {start, end} = span;
             let {style} = span;
             // Pango sizes every empty line (and the cursor on it) from the
             // styling at the very start of the text, so syntax there is
             // muted rather than shrunk, or empty lines get a dot of a cursor.
-            if (style === 'hide' && start === 0)
+            // A checkbox there keeps its closing ']' muted to match.
+            if (style === 'hide' && (start === 0 || start === mutedTo)) {
                 style = 'muted';
+                mutedTo = end;
+            } else if (style === 'box' && start === mutedTo) {
+                mutedTo = end;
+            }
             switch (style) {
             case 'hide':
                 // Shrink to almost nothing, in the note's own colour.
@@ -843,8 +850,8 @@ class Note {
                 add(Pango.attr_underline_new(Pango.Underline.SINGLE), start, end);
                 break;
             case 'box':
-                add(Pango.attr_weight_new(Pango.Weight.BOLD), start, end);
-                colour(LIVE_LINK, start, end);
+                // Drawn larger, as in the rendered view.
+                add(Pango.attr_scale_new(LIVE_BOX_SCALE), start, end);
                 break;
             case 'done':
                 add(Pango.attr_strikethrough_new(true), start, end);
